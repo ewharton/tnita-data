@@ -122,6 +122,28 @@ async function fetchJsonFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
   });
 }
 
+// Ensure ARWEAVE_JWK_PATH is available; if only ARWEAVE_JWK_B64 is set (e.g., in CI), decode to a temp file
+function ensureJwkPathEnv() {
+  if (process.env.ARWEAVE_JWK_PATH && fs.existsSync(process.env.ARWEAVE_JWK_PATH)) {
+    return process.env.ARWEAVE_JWK_PATH;
+  }
+  const b64 = process.env.ARWEAVE_JWK_B64;
+  if (!b64) return null;
+  const tmpDir = process.env.RUNNER_TEMP || process.env.TMPDIR || "/tmp";
+  const outPath = path.join(tmpDir, "arweave_jwk.json");
+  try {
+    const decoded = Buffer.from(b64, "base64").toString("utf8");
+    // rudimentary sanity check
+    if (!decoded.trim().startsWith("{")) throw new Error("decoded content is not JSON-like");
+    fs.writeFileSync(outPath, decoded, "utf8");
+    process.env.ARWEAVE_JWK_PATH = outPath;
+    return outPath;
+  } catch (e) {
+    console.error("Failed to decode ARWEAVE_JWK_B64:", e?.message || e);
+    return null;
+  }
+}
+
 // --- Trigger GitHub Actions workflow (for local runs with PAT) ---
 async function triggerGithubWorkflow({
   owner = "ewharton",
@@ -417,7 +439,9 @@ function processArtistsToCsv(artistsInput, dirPath) {
 
 // --- Upload helpers (ArDrive Turbo) ---
 function loadArweaveJwkFromEnv() {
-  const jwkPath = process.env.ARWEAVE_JWK_PATH;
+  // Prefer explicit path; otherwise, derive from ARWEAVE_JWK_B64
+  const ensuredPath = ensureJwkPathEnv();
+  const jwkPath = ensuredPath || process.env.ARWEAVE_JWK_PATH;
   if (!jwkPath) return null;
   try {
     const raw = fs.readFileSync(jwkPath, "utf8");

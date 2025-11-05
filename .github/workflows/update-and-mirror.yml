@@ -1,0 +1,28 @@
+name: update-and-mirror
+on:
+  schedule:
+    - cron: '15 6 * * *'   # daily at 06:15 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ARWEAVE_JWK_B64: ${{ secrets.ARWEAVE_JWK_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run updater
+        run: node update_data.js
