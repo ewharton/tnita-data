@@ -22,6 +22,7 @@ const ARNS_CONFIG = {
   // Set this if registry lookup fails, to bypass registry.
   // antContractTxId: undefined,
   antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
+
   ttlSeconds: 60,
 };
 
@@ -597,7 +598,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
 
 // AO-only update
 async function updateArnsTargetIfConfigured(manifestTxId) {
-  const nameToUpdate = ARNS_CONFIG.name || "network-art-test2";
+  const nameToUpdate = ARNS_CONFIG.name;
   if (!nameToUpdate) {
     console.log("ARNS_NAME not set; skipping ARNS update.");
     return null;
@@ -683,7 +684,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
         console.warn("Required CSVs missing; skipping manifest upload.");
       }
     }
-
+    throw new Error(`test failure`);
     if (manifestTxId) {
       const arnsTx = await updateArnsTargetIfConfigured(manifestTxId);
       if (arnsTx) {
