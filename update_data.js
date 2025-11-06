@@ -376,7 +376,7 @@ async function downloadArtistsRaw(dirPath) {
     console.log(`Saved ${fileName} with ${allArtists.length} artists`);
 
     if (allArtists.length === 0) {
-      console.warn("No artists found in paginated response.");
+      throw new Error("No artists found in paginated response");
     }
     return allArtists;
   } catch (err) {
@@ -460,23 +460,29 @@ async function initTurbo(jwk) {
 
 async function uploadFileWithTurbo(turbo, filePath, contentType, extraTags = []) {
   if (!fs.existsSync(filePath)) {
-    console.warn(`File not found, skipping upload: ${filePath}`);
-    return null;
+    throw new Error(`Upload source file not found: ${filePath}`);
   }
-  const result = await turbo.uploadFile({
-    fileStreamFactory: () => fs.createReadStream(filePath),
-    fileSizeFactory: () => fs.statSync(filePath).size,
-    dataItemOpts: {
-      tags: [
-        { name: "Content-Type", value: contentType },
-        { name: "App-Name", value: "network-art" },
-        { name: "App-Version", value: "v2" },
-        ...extraTags,
-      ],
-    },
-  });
-  console.log(`Uploaded ${path.basename(filePath)} -> ${result.id}`);
-  return result.id;
+  try {
+    const result = await turbo.uploadFile({
+      fileStreamFactory: () => fs.createReadStream(filePath),
+      fileSizeFactory: () => fs.statSync(filePath).size,
+      dataItemOpts: {
+        tags: [
+          { name: "Content-Type", value: contentType },
+          { name: "App-Name", value: "network-art" },
+          { name: "App-Version", value: "v2" },
+          ...extraTags,
+        ],
+      },
+    });
+    if (!result?.id) {
+      throw new Error(`Upload did not return a transaction id for ${path.basename(filePath)}`);
+    }
+    console.log(`Uploaded ${path.basename(filePath)} -> ${result.id}`);
+    return result.id;
+  } catch (e) {
+    throw new Error(`Upload failed for ${path.basename(filePath)}: ${e?.message || e}`);
+  }
 }
 
 async function uploadManifestWithTurbo(turbo, manifestObj) {
@@ -496,6 +502,9 @@ async function uploadManifestWithTurbo(turbo, manifestObj) {
       ],
     },
   });
+  if (!result?.id) {
+    throw new Error("Manifest upload did not return a transaction id");
+  }
   return { id: result.id, json };
 }
 
@@ -514,14 +523,16 @@ async function uploadJsonDataWithTurbo(turbo, jsonObj, extraTags = []) {
       ],
     },
   });
+  if (!result?.id) {
+    throw new Error("Metadata snapshot upload did not return a transaction id");
+  }
   return result.id;
 }
 
 async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   const jwk = loadArweaveJwkFromEnv();
   if (!jwk) {
-    console.log("ARWEAVE_JWK_PATH not set; skipping uploads.");
-    return null;
+    throw new Error("ARWEAVE_JWK not provided");
   }
   const turbo = await initTurbo(jwk);
   const today = getTodaySuffix();
@@ -545,6 +556,11 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   const missing = [];
   if (!fs.existsSync(cardsCsvPath)) missing.push(path.basename(cardsCsvPath));
   if (!fs.existsSync(profilesCsvPath)) missing.push(path.basename(profilesCsvPath));
+
+  // Fail early if required artifacts are missing
+  if (missing.length > 0) {
+    throw new Error(`Missing daily artifacts (${missing.join(", ")}); cannot upload manifest`);
+  }
 
   const cardsTxId = await uploadFileWithTurbo(turbo, cardsCsvPath, "text/csv");
   const profilesTxId = await uploadFileWithTurbo(turbo, profilesCsvPath, "text/csv");
@@ -578,11 +594,6 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   // Save local copy of snapshot metadata
   const snapshotLocalPath = path.join(dirPath, `snapshot_metadata__${today}.json`);
   writeJsonSafe(snapshotLocalPath, snapshotSidecar);
-
-  if (missing.length > 0) {
-    console.warn(`Missing daily artifacts (${missing.join(", ")}); skipping manifest upload.`);
-    return { cardsTxId, profilesTxId, manifestTxId: null };
-  }
 
   const { id: manifestTxId, json: manifestJson } = await uploadManifestWithTurbo(turbo, manifest);
   console.log(`Uploaded manifest -> ${manifestTxId}`);
@@ -665,6 +676,8 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
     const existingManifest = readJsonSafe(manifestPath);
 
     let manifestTxId = prevSummary?.manifestTxId || null;
+    const hadPrevManifest = Boolean(manifestTxId);
+    let uploadedNewManifest = false;
 
     // If no manifestTxId yet, decide whether to build and upload a new manifest
     if (!manifestTxId) {
@@ -680,26 +693,30 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
         const snapshotMeta = await downloadAndValidateSnapshot();
         const uploadSummary = await uploadCsvsAndManifest(dirPath, snapshotMeta);
         manifestTxId = uploadSummary?.manifestTxId || null;
+        if (!hadPrevManifest && manifestTxId) uploadedNewManifest = true;
       } else {
-        console.warn("Required CSVs missing; skipping manifest upload.");
+        throw new Error("Required CSVs missing; skipping manifest upload");
       }
     }
-    throw new Error(`test failure`);
     if (manifestTxId) {
       const arnsTx = await updateArnsTargetIfConfigured(manifestTxId);
-      if (arnsTx) {
-        const verified = await verifyArnsAndManifestAfterTtl(manifestTxId);
-        if (verified) {
-          try {
-            await triggerGithubWorkflow({
-              owner: "ewharton",
-              repo: "tnita-data",
-              workflowFile: "static.yml",
-              ref: "main",
-            });
-          } catch (e) {
-            console.error("Mirror workflow trigger failed:", e?.message || e);
-          }
+      if (uploadedNewManifest && !arnsTx) {
+        throw new Error("ARNS update failed (no txId) after manifest upload");
+      }
+      const verified = await verifyArnsAndManifestAfterTtl(manifestTxId);
+      if (uploadedNewManifest && !verified) {
+        throw new Error("ARNS verification failed (snapshot_metadata mismatch) after manifest upload");
+      }
+      if (verified) {
+        try {
+          await triggerGithubWorkflow({
+            owner: "ewharton",
+            repo: "tnita-data",
+            workflowFile: "static.yml",
+            ref: "main",
+          });
+        } catch (e) {
+          console.error("Mirror workflow trigger failed:", e?.message || e);
         }
       }
     }
