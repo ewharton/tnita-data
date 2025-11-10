@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 const CONFIG = {
   // failIfDateMismatch: true, // Set false to skip date validation
-  failIfDateMismatch: false, // Set false to skip date validation
+  failIfDateMismatch: true, // Set false to skip date validation
 };
 
 // --- ArNS Configuration (no .env needed for these) ---
@@ -177,8 +177,8 @@ async function triggerGithubWorkflow({
 
 
 async function verifyArnsAndManifestAfterTtl(manifestTxId) {
-  const ttlSeconds = Number(ARNS_CONFIG.ttlSeconds || 60);
-  const bufferSeconds = 5;
+  const ttlSeconds = Number(ARNS_CONFIG.ttlSeconds);
+  const bufferSeconds = 40;
   const waitMs = (ttlSeconds + bufferSeconds) * 1000;
   console.log(`Waiting ${ttlSeconds + bufferSeconds}s for ArNS TTL to elapse before verification...`);
   await delay(waitMs);
