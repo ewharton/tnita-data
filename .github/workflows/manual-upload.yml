@@ -26,6 +26,31 @@ jobs:
           mkdir -p public
           echo "Manual upload at $(date -u)" > public/index.html
 
+      - name: Keep existing CSVs from current Pages (if present)
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -e
+          BASE="https://${OWNER}.github.io/${REPO}"
+          echo "Attempting to keep existing CSVs from ${BASE}"
+          keep_one () {
+            NAME="$1"
+            URL="$BASE/$NAME"
+            echo "Fetching existing $URL"
+            curl -fsSL --retry 2 --retry-delay 3 --max-time 60 "$URL" -o "public/$NAME.tmp" || true
+            if [ -s "public/$NAME.tmp" ]; then
+              mv "public/$NAME.tmp" "public/$NAME"
+              echo "Kept existing public/$NAME"
+            else
+              rm -f "public/$NAME.tmp"
+              echo "No existing ${NAME} found on current Pages (ok to skip)"
+            fi
+          }
+          keep_one collectors_cards.csv
+          keep_one network_profiles.csv
+          keep_one cards_to_artists.csv
+
       - name: Download combo CSV
         run: |
           set -e
