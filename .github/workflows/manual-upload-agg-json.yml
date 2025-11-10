@@ -1,0 +1,85 @@
+name: Manual upload aggregate JSON to Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      agg_url:
+        description: 'Direct URL to aggregate JSON'
+        required: true
+      out_name:
+        description: 'Output filename under Pages (default: collectors_artists_agg.json)'
+        required: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-manual-upload-agg"
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare public dir
+        run: |
+          set -e
+          mkdir -p public
+          echo "Manual aggregate upload at $(date -u)" > public/index.html
+
+      - name: Keep existing common files from current Pages (if present)
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -e
+          BASE="https://${OWNER}.github.io/${REPO}"
+          echo "Attempting to keep existing files from ${BASE}"
+          keep_one () {
+            NAME="$1"
+            URL="$BASE/$NAME"
+            echo "Fetching existing $URL"
+            curl -fsSL --retry 2 --retry-delay 3 --max-time 60 "$URL" -o "public/$NAME.tmp" || true
+            if [ -s "public/$NAME.tmp" ]; then
+              mkdir -p "$(dirname "public/$NAME")"
+              mv "public/$NAME.tmp" "public/$NAME"
+              echo "Kept existing public/$NAME"
+            else
+              rm -f "public/$NAME.tmp"
+              echo "No existing ${NAME} found on current Pages (ok to skip)"
+            fi
+          }
+          # Preserve common artifacts mirrored today
+          keep_one collectors_cards.csv
+          keep_one network_profiles.csv
+          keep_one cards_to_artists.csv
+          keep_one collectors_profiles_combo.csv
+          keep_one collectors_artists_agg.json
+          keep_one collectors_artists_agg.compact.json
+
+      - name: Download aggregate JSON
+        env:
+          OUT_NAME: ${{ inputs.out_name }}
+        run: |
+          set -e
+          OUT="${OUT_NAME:-collectors_artists_agg.json}"
+          echo "Fetching ${{ inputs.agg_url }} -> public/${OUT}"
+          curl -fsSL --retry 3 --retry-delay 5 --max-time 240 "${{ inputs.agg_url }}" -o "public/${OUT}"
+          test -s "public/${OUT}"
+          ls -lh "public/${OUT}"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+
