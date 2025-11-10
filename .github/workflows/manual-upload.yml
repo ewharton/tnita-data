@@ -1,4 +1,4 @@
-name: Manual upload CSV to Pages (no commit)
+name: Manual upload combo CSV to Pages
 
 on:
   workflow_dispatch:
