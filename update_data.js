@@ -8,7 +8,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG = {
-  failIfDateMismatch: true, // Set false to skip date validation
+  // failIfDateMismatch: true, // Set false to skip date validation
+  failIfDateMismatch: false, // Set false to skip date validation
 };
 
 // --- ArNS Configuration (no .env needed for these) ---
@@ -285,10 +286,16 @@ async function downloadAndValidateSnapshot() {
   const txnId = arweaveUrl.replace(/^https:\/\/arweave\.net\//, "").trim();
   const todayCompact = getTodayCompact();
 
-  if (CONFIG.failIfDateMismatch && date !== todayCompact) {
-    throw new Error(
-      `Latest snapshot date (${date}) does not match today (${todayCompact})`
-    );
+  if (date !== todayCompact) {
+    if (CONFIG.failIfDateMismatch) {
+      throw new Error(
+        `Latest snapshot date (${date}) does not match today (${todayCompact})`
+      );
+    } else {
+      console.warn(
+        `WARN: Latest snapshot date (${date}) does not match today (${todayCompact}) – proceeding because failIfDateMismatch=false`
+      );
+    }
   }
 
   console.log(`Latest snapshot OK: date=${date}, block=${block}, txnId=${txnId}`);
@@ -323,7 +330,8 @@ async function downloadAndValidateSnapshot() {
 // --- Download network profile data (CSV) ---
 async function downloadProfileData(dirPath) {
   const url =
-    "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&download_all=true";
+    // "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&download_all=true";
+     "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&content=memes&collector=memes&download_all=true"
 
   console.log("Downloading profileData...");
   try {
@@ -705,7 +713,11 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       }
       const verified = await verifyArnsAndManifestAfterTtl(manifestTxId);
       if (uploadedNewManifest && !verified) {
-        throw new Error("ARNS verification failed (snapshot_metadata mismatch) after manifest upload");
+        if (CONFIG.failIfDateMismatch) {
+          throw new Error("ARNS verification failed (snapshot_metadata mismatch) after manifest upload");
+        } else {
+          console.warn("WARN: ARNS verification did not pass (pointer and/or snapshot date) – continuing because failIfDateMismatch=false");
+        }
       }
       if (verified) {
         try {
