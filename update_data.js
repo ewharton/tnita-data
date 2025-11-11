@@ -267,6 +267,48 @@ function fetchText(url) {
   });
 }
 
+async function fetchTextFollowRedirects(url, { maxRedirects = 5, attempts = 5, retryDelayMs = 2000 } = {}) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        const status = res.statusCode || 0;
+        if ([301, 302, 303, 307, 308].includes(status)) {
+          if (maxRedirects <= 0) {
+            reject(new Error(`Too many redirects fetching ${url}`));
+            return;
+          }
+          const loc = res.headers.location;
+          if (!loc) {
+            reject(new Error(`Redirect without Location from ${url}`));
+            return;
+          }
+          const nextUrl = resolveRedirectUrl(url, String(loc));
+          resolve(fetchTextFollowRedirects(nextUrl, { maxRedirects: maxRedirects - 1, attempts, retryDelayMs }));
+          return;
+        }
+        if (status === 202) {
+          if (attempts <= 1) {
+            reject(new Error(`Content not yet available (202) at ${url}`));
+            return;
+          }
+          setTimeout(() => {
+            resolve(fetchTextFollowRedirects(url, { maxRedirects, attempts: attempts - 1, retryDelayMs }));
+          }, retryDelayMs);
+          return;
+        }
+        if (status !== 200) {
+          reject(new Error(`Request failed: ${status}`));
+          return;
+        }
+        res.setEncoding("utf8");
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => resolve(data));
+      })
+      .on("error", reject);
+  });
+}
+
 // --- Download and validate the latest snapshot ---
 async function downloadAndValidateSnapshot() {
   const url = "https://api.6529.io/api/consolidated_uploads?page=1&page_size=10";
@@ -309,7 +351,7 @@ async function downloadCollectorsCsvFromArweave(dirPath, txnId) {
   const url = `https://arweave.net/${txnId}`;
   const outPath = path.join(dirPath, "collectors_cards.csv");
   console.log(`Downloading collectors_cards.csv from ${url} ...`);
-  const csv = await fetchText(url);
+  const csv = await fetchTextFollowRedirects(url);
   fs.writeFileSync(outPath, csv, "utf8");
   console.log(`Saved collectors_cards.csv (${csv.length} bytes)`);
   return outPath;
