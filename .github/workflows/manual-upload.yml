@@ -26,7 +26,7 @@ jobs:
           mkdir -p public
           echo "Manual upload at $(date -u)" > public/index.html
 
-      - name: Keep existing CSVs from current Pages (if present)
+      - name: Keep existing CSVs from current Pages
         env:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}

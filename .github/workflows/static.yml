@@ -53,6 +53,7 @@ jobs:
           fetch_one collectors_cards.csv
           fetch_one cards_to_artists.csv
           fetch_one network_profiles.csv
+          fetch_one collectors_artists_agg.json
           echo "Mirror updated at $(date -u)" > public/index.html
 
       - name: Setup Pages

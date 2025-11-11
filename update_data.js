@@ -9,7 +9,9 @@ const __dirname = path.dirname(__filename);
 
 const CONFIG = {
   // failIfDateMismatch: true, // Set false to skip date validation
-  failIfDateMismatch: true, // Set false to skip date validation
+  failIfDateMismatch: false, // Set false to skip date validation
+  // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
+  buildAgg: true,
 };
 
 // --- ArNS Configuration (no .env needed for these) ---
@@ -302,6 +304,17 @@ async function downloadAndValidateSnapshot() {
   return { date, block, txnId };
 }
 
+// --- Download collectors_cards.csv from Arweave txn id ---
+async function downloadCollectorsCsvFromArweave(dirPath, txnId) {
+  const url = `https://arweave.net/${txnId}`;
+  const outPath = path.join(dirPath, "collectors_cards.csv");
+  console.log(`Downloading collectors_cards.csv from ${url} ...`);
+  const csv = await fetchText(url);
+  fs.writeFileSync(outPath, csv, "utf8");
+  console.log(`Saved collectors_cards.csv (${csv.length} bytes)`);
+  return outPath;
+}
+
 // // --- Write the Arweave manifest ---
 // function writeManifest(snapshotMeta, dirPath) {
 //   const today = getTodaySuffix();
@@ -446,6 +459,178 @@ function processArtistsToCsv(artistsInput, dirPath) {
   console.log(`Saved ${csvName} (${csvContent.length} bytes)`);
 }
 
+// ===== Compact Aggregator (collectors_artists_agg.json) =====
+function parseCSVLine(line) {
+  const result = [];
+  let inQuotes = false;
+  let cur = "";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      result.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  result.push(cur);
+  return result;
+}
+
+function normalizeMemesJsonLike(memesRaw) {
+  if (memesRaw == null || memesRaw === "") return [];
+  const fixed = String(memesRaw).replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+  try {
+    const parsed = JSON.parse(fixed);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+async function loadProfilesMapFromFile(profilesCsvPath) {
+  const text = fs.readFileSync(profilesCsvPath, "utf8");
+  const lines = text.split("\n");
+  if (lines.length < 2) return new Map();
+  const headers = parseCSVLine(lines[0]).map((h) => h.replace(/"/g, "").trim());
+  const map = new Map();
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const cols = parseCSVLine(line);
+    const get = (name) => {
+      const idx = headers.indexOf(name);
+      return idx >= 0 && idx < cols.length ? cols[idx] : "";
+    };
+    const k = get("consolidation_key");
+    if (!k) continue;
+    map.set(k, {
+      handle: get("handle"),
+      consolidation_display: get("consolidation_display"),
+      boosted_tdh: get("boosted_tdh"),
+      unique_memes: get("unique_memes"),
+    });
+  }
+  return map;
+}
+
+async function loadCardsMapFromFile(cardsCsvPath) {
+  const text = fs.readFileSync(cardsCsvPath, "utf8");
+  const lines = text.split("\n");
+  if (lines.length < 2) return { cardsMap: new Map(), artistFirstTokenId: new Map() };
+  const headers = lines[0].split(",").map((h) => h.trim());
+  const tokenIdIdx = headers.findIndex((h) => h.toLowerCase() === "tokenid");
+  const artistIdx = headers.findIndex((h) => h.toLowerCase() === "artist");
+  const map = new Map();
+  const artistFirstTokenId = new Map();
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const cols = line.split(",");
+    if (cols.length <= Math.max(tokenIdIdx, artistIdx)) continue;
+    const tokenId = (cols[tokenIdIdx] || "").replace(/"/g, "").trim();
+    const artistField = (cols[artistIdx] || "").trim();
+    if (!tokenId || !artistField) continue;
+    const artists = artistField.split(",").map((s) => s.trim()).filter(Boolean);
+    map.set(tokenId, artists.length > 0 ? artists : [artistField]);
+    const nTid = Number(tokenId);
+    if (!isNaN(nTid)) {
+      for (const a of (artists.length > 0 ? artists : [artistField])) {
+        const prev = artistFirstTokenId.get(a);
+        if (prev == null || nTid < prev) artistFirstTokenId.set(a, nTid);
+      }
+    }
+  }
+  return { cardsMap: map, artistFirstTokenId };
+}
+
+async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPath }) {
+  const profilesMap = await loadProfilesMapFromFile(profilesCsvPath);
+  const { cardsMap, artistFirstTokenId } = await loadCardsMapFromFile(cardsCsvPath);
+
+  const text = fs.readFileSync(collectorsCsvPath, "utf8");
+  const lines = text.split("\n");
+  if (lines.length < 2) {
+    return {
+      artists: [],
+      collectors: [],
+      meta: { generated_at: new Date().toISOString(), totalCards: cardsMap.size },
+    };
+  }
+  const headers = parseCSVLine(lines[0]).map((h) => h.replace(/"/g, "").trim());
+
+  const compactArtistsList = [];
+  const compactNameToId = new Map();
+  const compactCollectors = [];
+
+  function getArtistId(name) {
+    let id = compactNameToId.get(name);
+    if (id == null) {
+      id = compactArtistsList.length;
+      compactNameToId.set(name, id);
+      const ftid = artistFirstTokenId.get(name) ?? null;
+      compactArtistsList.push([name, ftid]);
+    }
+    return id;
+  }
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const cols = parseCSVLine(line);
+    const get = (name) => {
+      const idx = headers.indexOf(name);
+      return idx >= 0 && idx < cols.length ? cols[idx] : "";
+    };
+    const consolidation_key = get("consolidation_key");
+    const memesRaw = get("memes");
+    if (!consolidation_key || !memesRaw) continue;
+
+    const prof = profilesMap.get(consolidation_key) || {};
+    const handle = prof.handle || "";
+    const boosted_tdh = Number(prof.boosted_tdh) || 0;
+    const unique_memes = Number(prof.unique_memes) || 0;
+
+    const memes = normalizeMemesJsonLike(memesRaw);
+    let collectorCardCount = 0;
+    let collectorTotalCardCount = 0;
+    const perArtist = new Map();
+    for (const m of memes) {
+      if (!m || m.id == null || m.balance == null || m.balance <= 0) continue;
+      const tid = String(m.id);
+      const mappedArtists = cardsMap.get(tid);
+      if (!mappedArtists || mappedArtists.length === 0) continue;
+      collectorCardCount += 1;
+      collectorTotalCardCount += Number(m.balance) || 0;
+      for (const a of mappedArtists) {
+        const key = a;
+        const prev = perArtist.get(key) || { name: a, uniqueCards: 0, totalBalance: 0 };
+        prev.uniqueCards += 1;
+        prev.totalBalance += Number(m.balance) || 0;
+        perArtist.set(key, prev);
+      }
+    }
+    const aTuples = Array.from(perArtist.values()).map((a) => [getArtistId(a.name), a.uniqueCards, a.totalBalance]);
+    compactCollectors.push([consolidation_key, handle, collectorCardCount, collectorTotalCardCount, unique_memes, boosted_tdh, aTuples]);
+  }
+
+  return {
+    artists: compactArtistsList,
+    collectors: compactCollectors,
+    meta: {
+      generated_at: new Date().toISOString(),
+      totalCards: cardsMap.size,
+    },
+  };
+}
+
 // --- Upload helpers (ArDrive Turbo) ---
 function loadArweaveJwkFromEnv() {
   // Prefer explicit path; otherwise, derive from ARWEAVE_JWK_B64
@@ -559,6 +744,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
 
   const cardsCsvPath = path.join(dirPath, `cards_to_artists__${today}.csv`);
   const profilesCsvPath = path.join(dirPath, `network_profiles__${today}.csv`);
+  const aggJsonPath = path.join(dirPath, "collectors_artists_agg.json");
 
   // Check required daily artifacts before manifest upload
   const missing = [];
@@ -572,6 +758,12 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
 
   const cardsTxId = await uploadFileWithTurbo(turbo, cardsCsvPath, "text/csv");
   const profilesTxId = await uploadFileWithTurbo(turbo, profilesCsvPath, "text/csv");
+  let aggTxId = null;
+  if (CONFIG.buildAgg && fs.existsSync(aggJsonPath)) {
+    aggTxId = await uploadFileWithTurbo(turbo, aggJsonPath, "application/json", [
+      { name: "Dataset", value: "collectors_artists_agg" },
+    ]);
+  }
 
   // Build manifest using available IDs
   const manifest = {
@@ -589,6 +781,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   };
   if (cardsTxId) manifest.paths["cards_to_artists.csv"] = { id: cardsTxId };
   if (profilesTxId) manifest.paths["network_profiles.csv"] = { id: profilesTxId };
+  if (aggTxId) manifest.paths["collectors_artists_agg.json"] = { id: aggTxId };
 
   // Upload a small sidecar snapshot.json for fast, reliable date checks via manifest path
   const snapshotSidecar = {
@@ -677,6 +870,29 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
     const artists = await downloadArtistsRaw(dirPath);
     processArtistsToCsv(artists, dirPath);
 
+    // Fetch latest snapshot meta and download collectors_cards.csv for local processing
+    const snapshotMeta = await downloadAndValidateSnapshot();
+    await downloadCollectorsCsvFromArweave(dirPath, snapshotMeta.txnId);
+
+    // Optionally build aggregated compact JSON
+    if (CONFIG.buildAgg) {
+      try {
+        const profilesCsv = path.join(dirPath, `network_profiles__${today}.csv`);
+        const cardsCsv = path.join(dirPath, `cards_to_artists__${today}.csv`);
+        const collectorsCsv = path.join(dirPath, "collectors_cards.csv");
+        const aggObj = await buildAggCompact({
+          collectorsCsvPath: collectorsCsv,
+          profilesCsvPath: profilesCsv,
+          cardsCsvPath: cardsCsv,
+        });
+        const aggOutPath = path.join(dirPath, "collectors_artists_agg.json");
+        writeJsonSafe(aggOutPath, aggObj);
+        console.log(`Wrote collectors_artists_agg.json with ${aggObj.collectors.length} collectors, ${aggObj.artists.length} artists`);
+      } catch (e) {
+        console.error("Failed to build collectors_artists_agg.json:", e?.message || e);
+      }
+    }
+
     // Determine if we already uploaded a manifest today
     const summaryPath = path.join(dirPath, `upload_summary__${today}.json`);
     const manifestPath = path.join(dirPath, `manifest__${today}.json`);
@@ -698,7 +914,6 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
         // If we already have a local manifest with collectors id, we can skip re-writing it
         // but we still need snapshot meta for a fresh manifest upload if none was uploaded.
         // Fetch snapshot meta only when needed.
-        const snapshotMeta = await downloadAndValidateSnapshot();
         const uploadSummary = await uploadCsvsAndManifest(dirPath, snapshotMeta);
         manifestTxId = uploadSummary?.manifestTxId || null;
         if (!hadPrevManifest && manifestTxId) uploadedNewManifest = true;
