@@ -1,7 +1,7 @@
 name: update-and-mirror
 on:
   schedule:
-    - cron: '0 17 * * 3'   # weekly, Wednesdays at 17:00 UTC
+    - cron: '0 10 * * 4'   # weekly, Thursdays at 10:00 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -26,3 +26,14 @@ jobs:
 
       - name: Run updater
         run: node update_data.js
+
+      - name: Upload data artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ github.run_id }}
+          path: |
+            data/**/*.json
+            data/**/*.csv
+            !data/**/collectors_cards.csv
+          retention-days: 14
+          if-no-files-found: ignore
