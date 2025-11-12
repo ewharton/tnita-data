@@ -8,24 +8,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG = {
-  // failIfDateMismatch: true, // Set false to skip date validation
-  failIfDateMismatch: false, // Set false to skip date validation
+  failIfDateMismatch: true, // Set false to skip date validation
   // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
   buildAgg: true,
 };
 
-// --- ArNS Configuration (no .env needed for these) ---
 const ARNS_CONFIG = {
-  // Your ArNS name
   name: "network-art-test2",
   // If you know the mainnet ArNS registry contract tx id, set it here.
   // If left undefined, SDK default will be used.
   registryTx: undefined,
   // Optional hard override of the ANT (contract) id for your name.
   // Set this if registry lookup fails, to bypass registry.
-  // antContractTxId: undefined,
   antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
-
   ttlSeconds: 60,
 };
 
@@ -130,7 +125,7 @@ async function fetchJsonFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
   });
 }
 
-// Ensure ARWEAVE_JWK_PATH is available; if only ARWEAVE_JWK_B64 is set (e.g., in CI), decode to a temp file
+// Ensure ARWEAVE_JWK_PATH is available; if only ARWEAVE_JWK_B64 is set, decode to temp file
 function ensureJwkPathEnv() {
   if (process.env.ARWEAVE_JWK_PATH && fs.existsSync(process.env.ARWEAVE_JWK_PATH)) {
     return process.env.ARWEAVE_JWK_PATH;
@@ -141,7 +136,7 @@ function ensureJwkPathEnv() {
   const outPath = path.join(tmpDir, "arweave_jwk.json");
   try {
     const decoded = Buffer.from(b64, "base64").toString("utf8");
-    // rudimentary sanity check
+    // sanity check
     if (!decoded.trim().startsWith("{")) throw new Error("decoded content is not JSON-like");
     fs.writeFileSync(outPath, decoded, "utf8");
     process.env.ARWEAVE_JWK_PATH = outPath;
@@ -182,7 +177,7 @@ async function triggerGithubWorkflow({
 }
 
 
-async function verifyArnsAndManifestAfterTtl(manifestTxId) {
+async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false } = {}) {
   const ttlSeconds = Number(ARNS_CONFIG.ttlSeconds);
   const bufferSeconds = 40;
   const waitMs = (ttlSeconds + bufferSeconds) * 1000;
@@ -200,35 +195,41 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId) {
     const rootRecordAO = await antReadableAO.getRecord({ undername: "@" });
     const pointedTx = rootRecordAO?.transactionId || null;
     console.log(`ArNS '@' now points to: ${pointedTx || '<none>'}`);
-    if (pointedTx !== manifestTxId) {
+    const pointerOk = pointedTx === manifestTxId;
+    if (!pointerOk) {
       console.warn("ArNS record does not yet point to the expected manifest.");
-      return false;
+      // Continue to try date verification via direct manifest path
     }
 
-    // Verify via snapshot_metadata.json path (works as soon as data is available)
+    // Verify via collectors_artists_agg.json path (reads meta.snapshot_date)
     const maxAttempts = 5; 
     const retryDelayMs = 5000;
     for (let i = 1; i <= maxAttempts; i++) {
       try {
-        const snapshot = await fetchJsonFollowRedirects(`https://arweave.net/${manifestTxId}/snapshot_metadata.json`);
-        const got = snapshot?.date;
+        const agg = await fetchJsonFollowRedirects(`https://arweave.net/${manifestTxId}/collectors_artists_agg.json`);
+        const got = agg?.meta?.snapshot_date;
         const expected = getTodayCompact();
         if (got === expected) {
-          console.log(`snapshot_metadata.json date verified: ${got}`);
-          return true;
+          console.log(`collectors_artists_agg.meta.snapshot_date verified: ${got}`);
+          return { ok: true, pointerOk: pointerOk, date: got };
         } else {
-          console.warn(`Attempt ${i}/${maxAttempts}: snapshot_metadata.json date=${got || '<none>'} expected=${expected}`);
+          console.warn(`Attempt ${i}/${maxAttempts}: collectors_artists_agg.meta.snapshot_date=${got || '<none>'} expected=${expected}`);
+          if (earlyExitOnMismatchedDate && got && got !== expected) {
+            console.warn("Early exit on mismatched snapshot date due to strict setting.");
+            return { ok: false, pointerOk: pointerOk, date: got };
+          }
         }
       } catch (e) {
-        console.warn(`Attempt ${i}/${maxAttempts} snapshot_metadata.json not ready: ${e?.message || e}`);
+        console.warn(`Attempt ${i}/${maxAttempts} collectors_artists_agg.json not ready or missing: ${e?.message || e}`);
+        // If CONFIG.buildAgg was false or agg not uploaded, verification cannot proceed from this source.
       }
       await delay(retryDelayMs);
     }
-    console.warn("snapshot_metadata.json verification did not complete within retries.");
-    return false;
+    console.warn("collectors_artists_agg.json verification did not complete within retries.");
+    return { ok: false, pointerOk: pointerOk, date: null };
   } catch (e) {
     console.error("Verification error:", e?.message || e);
-    return false;
+    return { ok: false, pointerOk: false, date: null };
   }
 }
 
@@ -361,35 +362,12 @@ async function downloadCollectorsCsvFromArweave(dirPath, txnId) {
   return outPath;
 }
 
-// // --- Write the Arweave manifest ---
-// function writeManifest(snapshotMeta, dirPath) {
-//   const today = getTodaySuffix();
-//   const manifest = {
-//     manifest: "arweave/paths",
-//     version: "0.1.0",
-//     index: { path: "collectors_cards.csv" },
-//     paths: {
-//       "collectors_cards.csv": { id: snapshotMeta.txnId },
-//       // "cards_metadata.csv": { id: "" },
-//       "cards_to_artists.csv": { id: "" },
-//       "network_profiles.csv": { id: "" },
-//     },
-//     metadata: {
-//       date: snapshotMeta.date,
-//       block: snapshotMeta.block,
-//     },
-//   };
-
-//   // const filePath = path.join(dirPath, "manifest_data.json");
-//   const filePath = path.join(dirPath, `manifest__${today}.json`);
-//   fs.writeFileSync(filePath, JSON.stringify(manifest, null, 2), "utf8");
-//   console.log(`Created manifest.json in ${dirPath}`);
-// }
 
 // --- Download network profile data (CSV) ---
 async function downloadProfileData(dirPath) {
+  // Profiles for 6529 handles, joined on consolidation key 
+  // All collectors with memes
   const url =
-    // "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&download_all=true";
      "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&content=memes&collector=memes&download_all=true"
 
   console.log("Downloading profileData...");
@@ -602,7 +580,7 @@ async function loadCardsMapFromFile(cardsCsvPath) {
   return { cardsMap: map, artistFirstTokenId };
 }
 
-async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPath }) {
+async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPath, snapshotMeta }) {
   const profilesMap = await loadProfilesMapFromFile(profilesCsvPath);
   const { cardsMap, artistFirstTokenId } = await loadCardsMapFromFile(cardsCsvPath);
 
@@ -610,9 +588,14 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
   const lines = text.split("\n");
   if (lines.length < 2) {
     return {
+      meta: {
+        generated_at: new Date().toISOString(),
+        totalCards: cardsMap.size,
+        snapshot_date: snapshotMeta?.date ?? null,
+        snapshot_block: snapshotMeta?.block ?? null,
+      },
       artists: [],
       collectors: [],
-      meta: { generated_at: new Date().toISOString(), totalCards: cardsMap.size },
     };
   }
   const headers = parseCSVLine(lines[0]).map((h) => h.replace(/"/g, "").trim());
@@ -673,12 +656,14 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
   }
 
   return {
-    artists: compactArtistsList,
-    collectors: compactCollectors,
     meta: {
       generated_at: new Date().toISOString(),
       totalCards: cardsMap.size,
+      snapshot_date: snapshotMeta?.date ?? null,
+      snapshot_block: snapshotMeta?.block ?? null,
     },
+    artists: compactArtistsList,
+    collectors: compactCollectors,
   };
 }
 
@@ -820,8 +805,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   const manifest = {
     manifest: "arweave/paths",
     version: "0.1.0",
-    // index: { path: "collectors_cards.csv" },
-    index: { path: "snapshot_metadata.json" },
+    index: { path: "collectors_artists_agg.json" },
     paths: {
       "collectors_cards.csv": { id: snapshotMeta.txnId },
     },
@@ -834,23 +818,9 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   if (profilesTxId) manifest.paths["network_profiles.csv"] = { id: profilesTxId };
   if (aggTxId) manifest.paths["collectors_artists_agg.json"] = { id: aggTxId };
 
-  // Upload a small sidecar snapshot.json for fast, reliable date checks via manifest path
-  const snapshotSidecar = {
-    date: snapshotMeta.date,
-    block: snapshotMeta.block,
-  };
-  const snapshotTxId = await uploadJsonDataWithTurbo(turbo, snapshotSidecar, [
-    { name: "Snapshot-Date", value: String(snapshotMeta.date) },
-  ]);
-  manifest.paths["snapshot_metadata.json"] = { id: snapshotTxId };
-  // Save local copy of snapshot metadata
-  const snapshotLocalPath = path.join(dirPath, `snapshot_metadata__${today}.json`);
-  writeJsonSafe(snapshotLocalPath, snapshotSidecar);
-
   const { id: manifestTxId, json: manifestJson } = await uploadManifestWithTurbo(turbo, manifest);
   console.log(`Uploaded manifest -> ${manifestTxId}`);
 
-  // Also write the same manifest locally with our usual filename
   const manifestPath = path.join(dirPath, `manifest__${today}.json`);
   fs.writeFileSync(manifestPath, manifestJson, "utf8");
 
@@ -935,6 +905,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
           collectorsCsvPath: collectorsCsv,
           profilesCsvPath: profilesCsv,
           cardsCsvPath: cardsCsv,
+          snapshotMeta,
         });
         const aggOutPath = path.join(dirPath, "collectors_artists_agg.json");
         writeJsonMin(aggOutPath, aggObj);
@@ -977,15 +948,17 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       if (uploadedNewManifest && !arnsTx) {
         throw new Error("ARNS update failed (no txId) after manifest upload");
       }
-      const verified = await verifyArnsAndManifestAfterTtl(manifestTxId);
-      if (uploadedNewManifest && !verified) {
-        if (CONFIG.failIfDateMismatch) {
-          throw new Error("ARNS verification failed (snapshot_metadata mismatch) after manifest upload");
-        } else {
-          console.warn("WARN: ARNS verification did not pass (pointer and/or snapshot date) – continuing because failIfDateMismatch=false");
-        }
+      const verification = await verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate: CONFIG.failIfDateMismatch });
+      const expectedDate = getTodayCompact();
+      const dateMismatch = verification?.date && verification.date !== expectedDate;
+      if (uploadedNewManifest && CONFIG.failIfDateMismatch && (dateMismatch || !verification?.ok)) {
+        throw new Error("ARNS verification failed (collectors_artists_agg.meta.snapshot_date mismatch) after manifest upload");
       }
-      if (verified) {
+      if (!CONFIG.failIfDateMismatch && (!verification?.ok || dateMismatch)) {
+        console.warn("WARN: Verification did not pass (pointer and/or snapshot date). Proceeding because failIfDateMismatch=false.");
+      }
+      // Proceed with mirror regardless if failIfDateMismatch is false; otherwise only on success.
+      if (!CONFIG.failIfDateMismatch || verification?.ok) {
         try {
           await triggerGithubWorkflow({
             owner: "ewharton",
@@ -999,7 +972,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       }
     }
 
-    console.log("All downloads complete.");
+    console.log("Update complete.");
   } catch (err) {
     console.error("Fatal error:", err.message);
     process.exit(1);
