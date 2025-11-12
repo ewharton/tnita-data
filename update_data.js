@@ -201,27 +201,37 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId) {
       return false;
     }
 
-    // Verify via snapshot_metadata.json path (works as soon as data is available)
+    // Verify by reading embedded metadata inside collectors_artists_agg.json
     const maxAttempts = 5; 
     const retryDelayMs = 5000;
+    let matched = false;
     for (let i = 1; i <= maxAttempts; i++) {
       try {
-        const snapshot = await fetchJsonFollowRedirects(`https://arweave.net/${manifestTxId}/snapshot_metadata.json`);
-        const got = snapshot?.date;
+        const agg = await fetchJsonFollowRedirects(`https://arweave.net/${manifestTxId}/collectors_artists_agg.json`);
+        const got = agg?.metadata?.snapshot_date || null;
         const expected = getTodayCompact();
         if (got === expected) {
-          console.log(`snapshot_metadata.json date verified: ${got}`);
-          return true;
+          console.log(`collectors_artists_agg.json metadata.snapshot_date verified: ${got}`);
+          matched = true;
+          break;
         } else {
-          console.warn(`Attempt ${i}/${maxAttempts}: snapshot_metadata.json date=${got || '<none>'} expected=${expected}`);
+          console.warn(`Attempt ${i}/${maxAttempts}: agg.metadata.snapshot_date=${got || '<none>'} expected=${expected}`);
         }
       } catch (e) {
-        console.warn(`Attempt ${i}/${maxAttempts} snapshot_metadata.json not ready: ${e?.message || e}`);
+        console.warn(`Attempt ${i}/${maxAttempts} collectors_artists_agg.json not ready: ${e?.message || e}`);
       }
       await delay(retryDelayMs);
     }
-    console.warn("snapshot_metadata.json verification did not complete within retries.");
-    return false;
+    if (!matched) {
+      console.warn("Embedded metadata verification did not complete within retries.");
+      // In non-strict mode, warn but do not fail/block progression
+      if (!CONFIG.failIfDateMismatch) {
+        console.warn("Continuing despite date mismatch (failIfDateMismatch=false).");
+        return true;
+      }
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error("Verification error:", e?.message || e);
     return false;
@@ -567,7 +577,7 @@ async function loadCardsMapFromFile(cardsCsvPath) {
   const text = fs.readFileSync(cardsCsvPath, "utf8");
   const lines = text.split("\n");
   if (lines.length < 2) return { cardsMap: new Map(), artistFirstTokenId: new Map() };
-  const headers = lines[0].split(",").map((h) => h.trim());
+  const headers = parseCSVLine(lines[0]).map((h) => h.replace(/"/g, "").trim());
   const tokenIdIdx = headers.findIndex((h) => h.toLowerCase() === "tokenid");
   const artistIdx = headers.findIndex((h) => h.toLowerCase() === "artist");
   const map = new Map();
@@ -575,17 +585,43 @@ async function loadCardsMapFromFile(cardsCsvPath) {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
-    const cols = line.split(",");
+    const cols = parseCSVLine(line);
     if (cols.length <= Math.max(tokenIdIdx, artistIdx)) continue;
     const tokenId = (cols[tokenIdIdx] || "").replace(/"/g, "").trim();
-    const artistField = (cols[artistIdx] || "").trim();
+    const artistFieldRaw = cols[artistIdx] || "";
+    const artistField = artistFieldRaw.trim();
     if (!tokenId || !artistField) continue;
-    const artists = artistField.split(",").map((s) => s.trim()).filter(Boolean);
-    map.set(tokenId, artists.length > 0 ? artists : [artistField]);
+    let artists = [];
+    // Prefer JSON list if present
+    if (artistField.startsWith("[")) {
+      try {
+        const arr = JSON.parse(artistField);
+        if (Array.isArray(arr)) {
+          artists = arr.map((n) => String(n).trim());
+        }
+      } catch {}
+    }
+    if (artists.length === 0) {
+      // Fallback: split by comma, then strip surrounding quotes on each
+      const stripOuterQuotes = (s) => {
+        let t = String(s).trim();
+        if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+          t = t.slice(1, -1);
+        }
+        return t;
+      };
+      artists = artistField
+        .split(",")
+        .map((s) => stripOuterQuotes(s))
+        .map((s) => s.replace(/^"+|"+$/g, "").trim())
+        .filter(Boolean);
+    }
+    map.set(tokenId, artists.length > 0 ? artists : [artistField.replace(/^"+|"+$/g, "").trim()]);
     const nTid = Number(tokenId);
     if (!isNaN(nTid)) {
-      for (const a of (artists.length > 0 ? artists : [artistField])) {
-        const prev = artistFirstTokenId.get(a);
+      for (const a of (artists.length > 0 ? artists : [artistField.replace(/^"+|"+$/g, "").trim()])) {
+        const nameSan = String(a).replace(/^"+|"+$/g, "").trim();
+        const prev = artistFirstTokenId.get(nameSan);
         if (prev == null || nTid < prev) artistFirstTokenId.set(a, nTid);
       }
     }
@@ -593,7 +629,7 @@ async function loadCardsMapFromFile(cardsCsvPath) {
   return { cardsMap: map, artistFirstTokenId };
 }
 
-async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPath }) {
+async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPath, snapshotDate, snapshotBlock }) {
   const profilesMap = await loadProfilesMapFromFile(profilesCsvPath);
   const { cardsMap, artistFirstTokenId } = await loadCardsMapFromFile(cardsCsvPath);
 
@@ -601,9 +637,9 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
   const lines = text.split("\n");
   if (lines.length < 2) {
     return {
+      metadata: { generated_at: new Date().toISOString(), totalCards: cardsMap.size, snapshot_date: snapshotDate || null, snapshot_block: snapshotBlock || null },
       artists: [],
-      collectors: [],
-      meta: { generated_at: new Date().toISOString(), totalCards: cardsMap.size },
+      collectors: []
     };
   }
   const headers = parseCSVLine(lines[0]).map((h) => h.replace(/"/g, "").trim());
@@ -612,13 +648,24 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
   const compactNameToId = new Map();
   const compactCollectors = [];
 
+  function sanitizeArtistName(name) {
+    let s = String(name ?? "").trim();
+    if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+      s = s.slice(1, -1).trim();
+    }
+    // Remove any residual leading/trailing quotes
+    s = s.replace(/^"+|"+$/g, "").trim();
+    return s;
+  }
+
   function getArtistId(name) {
-    let id = compactNameToId.get(name);
+    const clean = sanitizeArtistName(name);
+    let id = compactNameToId.get(clean);
     if (id == null) {
       id = compactArtistsList.length;
-      compactNameToId.set(name, id);
-      const ftid = artistFirstTokenId.get(name) ?? null;
-      compactArtistsList.push([name, ftid]);
+      compactNameToId.set(clean, id);
+      const ftid = artistFirstTokenId.get(clean) ?? null;
+      compactArtistsList.push([clean, ftid]);
     }
     return id;
   }
@@ -652,7 +699,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
       collectorCardCount += 1;
       collectorTotalCardCount += Number(m.balance) || 0;
       for (const a of mappedArtists) {
-        const key = a;
+        const key = sanitizeArtistName(a);
         const prev = perArtist.get(key) || { name: a, uniqueCards: 0, totalBalance: 0 };
         prev.uniqueCards += 1;
         prev.totalBalance += Number(m.balance) || 0;
@@ -664,12 +711,14 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
   }
 
   return {
-    artists: compactArtistsList,
-    collectors: compactCollectors,
-    meta: {
+    metadata: {
       generated_at: new Date().toISOString(),
       totalCards: cardsMap.size,
+      snapshot_date: snapshotDate || null,
+      snapshot_block: snapshotBlock || null,
     },
+    artists: compactArtistsList,
+    collectors: compactCollectors
   };
 }
 
@@ -774,7 +823,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
 
   // Idempotency: if we already uploaded today, reuse
   const summaryPath = path.join(dirPath, `upload_summary__${today}.json`);
-  if (fs.existsSync(summaryPath)) {
+  if (!CONFIG.buildAgg && fs.existsSync(summaryPath)) {
     try {
       const prev = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
       if (prev?.manifestTxId) {
@@ -811,8 +860,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   const manifest = {
     manifest: "arweave/paths",
     version: "0.1.0",
-    // index: { path: "collectors_cards.csv" },
-    index: { path: "snapshot_metadata.json" },
+    index: { path: "collectors_artists_agg.json" },
     paths: {
       "collectors_cards.csv": { id: snapshotMeta.txnId },
     },
@@ -825,18 +873,6 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   if (profilesTxId) manifest.paths["network_profiles.csv"] = { id: profilesTxId };
   if (aggTxId) manifest.paths["collectors_artists_agg.json"] = { id: aggTxId };
 
-  // Upload a small sidecar snapshot.json for fast, reliable date checks via manifest path
-  const snapshotSidecar = {
-    date: snapshotMeta.date,
-    block: snapshotMeta.block,
-  };
-  const snapshotTxId = await uploadJsonDataWithTurbo(turbo, snapshotSidecar, [
-    { name: "Snapshot-Date", value: String(snapshotMeta.date) },
-  ]);
-  manifest.paths["snapshot_metadata.json"] = { id: snapshotTxId };
-  // Save local copy of snapshot metadata
-  const snapshotLocalPath = path.join(dirPath, `snapshot_metadata__${today}.json`);
-  writeJsonSafe(snapshotLocalPath, snapshotSidecar);
 
   const { id: manifestTxId, json: manifestJson } = await uploadManifestWithTurbo(turbo, manifest);
   console.log(`Uploaded manifest -> ${manifestTxId}`);
@@ -922,10 +958,12 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
         const profilesCsv = path.join(dirPath, `network_profiles__${today}.csv`);
         const cardsCsv = path.join(dirPath, `cards_to_artists__${today}.csv`);
         const collectorsCsv = path.join(dirPath, "collectors_cards.csv");
-        const aggObj = await buildAggCompact({
+    const aggObj = await buildAggCompact({
           collectorsCsvPath: collectorsCsv,
           profilesCsvPath: profilesCsv,
-          cardsCsvPath: cardsCsv,
+      cardsCsvPath: cardsCsv,
+      snapshotDate: snapshotMeta?.date,
+      snapshotBlock: snapshotMeta?.block
         });
         const aggOutPath = path.join(dirPath, "collectors_artists_agg.json");
         writeJsonSafe(aggOutPath, aggObj);
