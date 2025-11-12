@@ -1,7 +1,7 @@
 name: update-and-mirror
 on:
   schedule:
-    - cron: '0 10 * * 2'   # weekly, Tuesdays at 10:00 UTC
+    - cron: '0 10 * * 3'   # weekly, Wednesdays at 10:00 UTC
   workflow_dispatch: {}
 
 permissions:
