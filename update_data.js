@@ -8,24 +8,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG = {
-  // failIfDateMismatch: true, // Set false to skip date validation
-  failIfDateMismatch: false, // Set false to skip date validation
+  failIfDateMismatch: true, // Set false to skip date validation
   // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
   buildAgg: true,
 };
 
-// --- ArNS Configuration (no .env needed for these) ---
 const ARNS_CONFIG = {
-  // Your ArNS name
-  name: "network-art-test2",
+  
+  name: "network-art-test2", // ArNS name
   // If you know the mainnet ArNS registry contract tx id, set it here.
   // If left undefined, SDK default will be used.
   registryTx: undefined,
   // Optional hard override of the ANT (contract) id for your name.
   // Set this if registry lookup fails, to bypass registry.
-  // antContractTxId: undefined,
   antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
-
   ttlSeconds: 60,
 };
 
@@ -137,7 +133,7 @@ function ensureJwkPathEnv() {
   const outPath = path.join(tmpDir, "arweave_jwk.json");
   try {
     const decoded = Buffer.from(b64, "base64").toString("utf8");
-    // rudimentary sanity check
+    // sanity check
     if (!decoded.trim().startsWith("{")) throw new Error("decoded content is not JSON-like");
     fs.writeFileSync(outPath, decoded, "utf8");
     process.env.ARWEAVE_JWK_PATH = outPath;
@@ -367,35 +363,10 @@ async function downloadCollectorsCsvFromArweave(dirPath, txnId) {
   return outPath;
 }
 
-// // --- Write the Arweave manifest ---
-// function writeManifest(snapshotMeta, dirPath) {
-//   const today = getTodaySuffix();
-//   const manifest = {
-//     manifest: "arweave/paths",
-//     version: "0.1.0",
-//     index: { path: "collectors_cards.csv" },
-//     paths: {
-//       "collectors_cards.csv": { id: snapshotMeta.txnId },
-//       // "cards_metadata.csv": { id: "" },
-//       "cards_to_artists.csv": { id: "" },
-//       "network_profiles.csv": { id: "" },
-//     },
-//     metadata: {
-//       date: snapshotMeta.date,
-//       block: snapshotMeta.block,
-//     },
-//   };
-
-//   // const filePath = path.join(dirPath, "manifest_data.json");
-//   const filePath = path.join(dirPath, `manifest__${today}.json`);
-//   fs.writeFileSync(filePath, JSON.stringify(manifest, null, 2), "utf8");
-//   console.log(`Created manifest.json in ${dirPath}`);
-// }
-
 // --- Download network profile data (CSV) ---
 async function downloadProfileData(dirPath) {
+  // Profiles of memes collectors only, needed for 6529 handles, joined on consolidation key 
   const url =
-    // "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&download_all=true";
      "https://api.6529.io/api/tdh/consolidated_metrics?page_size=50&page=1&sort=level&sort_direction=DESC&content=memes&collector=memes&download_all=true"
 
   console.log("Downloading profileData...");
