@@ -1,4 +1,4 @@
-name: Mirror ARNS CSVs to GitHub Pages
+name: mirror-arns-data-to-gh-pages
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - ".github/workflows/static.yml"
+      - ".github/workflows/mirror.yml"
 
 permissions:
   contents: write
