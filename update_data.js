@@ -15,11 +15,6 @@ const CONFIG = {
 
 const ARNS_CONFIG = {
   name: "network-art-test2",
-  // If you know the mainnet ArNS registry contract tx id, set it here.
-  // If left undefined, SDK default will be used.
-  registryTx: undefined,
-  // Optional hard override of the ANT (contract) id for your name.
-  // Set this if registry lookup fails, to bypass registry.
   antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
   ttlSeconds: 60,
 };
@@ -151,7 +146,7 @@ function ensureJwkPathEnv() {
 async function triggerGithubWorkflow({
   owner = "ewharton",
   repo = "tnita-data",
-  workflowFile = "static.yml",
+  workflowFile = "mirror.yml",
   ref = "main",
   token = process.env.GITHUB_TOKEN,
 } = {}) {
@@ -707,7 +702,7 @@ async function uploadFileWithTurbo(turbo, filePath, contentType, extraTags = [])
     if (!result?.id) {
       throw new Error(`Upload did not return a transaction id for ${path.basename(filePath)}`);
     }
-    console.log(`Uploaded ${path.basename(filePath)} -> ${result.id}`);
+    console.log(`Uploaded (Turbo) ${path.basename(filePath)} -> ${result.id}`);
     return result.id;
   } catch (e) {
     throw new Error(`Upload failed for ${path.basename(filePath)}: ${e?.message || e}`);
@@ -755,7 +750,98 @@ async function uploadJsonDataWithTurbo(turbo, jsonObj, extraTags = []) {
   if (!result?.id) {
     throw new Error("Metadata snapshot upload did not return a transaction id");
   }
+  console.log(`Uploaded (Turbo) JSON blob -> ${result.id}`);
   return result.id;
+}
+
+function getUploadProvider() {
+  const raw = String(process.env.UPLOAD_PROVIDER || "auto").toLowerCase().trim();
+  if (raw === "turbo" || raw === "arweave") return raw;
+  return "auto";
+}
+
+async function uploadFileWithArweave(jwk, filePath, contentType, extraTags = []) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Upload source file not found: ${filePath}`);
+  }
+  const Arweave = (await import("arweave")).default;
+  const arweave = Arweave.init({ host: "arweave.net", port: 443, protocol: "https" });
+  const data = fs.readFileSync(filePath);
+  const tx = await arweave.createTransaction({ data }, jwk);
+  tx.addTag("Content-Type", contentType);
+  tx.addTag("App-Name", "network-art");
+  tx.addTag("App-Version", "v2");
+  for (const t of extraTags) {
+    if (t?.name && t?.value) tx.addTag(String(t.name), String(t.value));
+  }
+  await arweave.transactions.sign(tx, jwk);
+  const res = await arweave.transactions.post(tx);
+  if (![200, 202].includes(res?.status)) {
+    throw new Error(`Arweave post failed: ${res?.status}`);
+  }
+  console.log(`Uploaded (L1) ${path.basename(filePath)} -> ${tx.id}`);
+  return tx.id;
+}
+
+async function uploadManifestWithArweave(jwk, manifestObj) {
+  const Arweave = (await import("arweave")).default;
+  const arweave = Arweave.init({ host: "arweave.net", port: 443, protocol: "https" });
+  const json = JSON.stringify(manifestObj, null, 2);
+  const tx = await arweave.createTransaction({ data: json }, jwk);
+  tx.addTag("Content-Type", "application/x.arweave-manifest+json");
+  tx.addTag("App-Name", "network-art");
+  tx.addTag("App-Version", "v2");
+  if (manifestObj?.metadata?.date) {
+    tx.addTag("Snapshot-Date", String(manifestObj.metadata.date));
+  }
+  await arweave.transactions.sign(tx, jwk);
+  const res = await arweave.transactions.post(tx);
+  if (![200, 202].includes(res?.status)) {
+    throw new Error(`Arweave manifest post failed: ${res?.status}`);
+  }
+  return { id: tx.id, json };
+}
+
+async function uploadFileAuto(filePath, contentType, extraTags = []) {
+  const provider = getUploadProvider();
+  const jwk = loadArweaveJwkFromEnv();
+  if (!jwk) throw new Error("ARWEAVE_JWK not provided");
+  if (provider === "arweave") {
+    return await uploadFileWithArweave(jwk, filePath, contentType, extraTags);
+  }
+  // provider === "turbo" or "auto"
+  try {
+    const turbo = await initTurbo(jwk);
+    return await uploadFileWithTurbo(turbo, filePath, contentType, extraTags);
+  } catch (e) {
+    if (provider === "turbo") throw e;
+    console.warn(`Turbo upload failed; falling back to L1: ${e?.message || e}`);
+    return await uploadFileWithArweave(jwk, filePath, contentType, extraTags);
+  }
+}
+
+async function uploadManifestAuto(manifestObj) {
+  const provider = getUploadProvider();
+  const jwk = loadArweaveJwkFromEnv();
+  if (!jwk) throw new Error("ARWEAVE_JWK not provided");
+  if (provider === "arweave") {
+    const res = await uploadManifestWithArweave(jwk, manifestObj);
+    console.log(`Uploaded (L1) manifest -> ${res.id}`);
+    return res;
+  }
+  // provider === "turbo" or "auto"
+  try {
+    const turbo = await initTurbo(jwk);
+    const res = await uploadManifestWithTurbo(turbo, manifestObj);
+    console.log(`Uploaded (Turbo) manifest -> ${res.id}`);
+    return res;
+  } catch (e) {
+    if (provider === "turbo") throw e;
+    console.warn(`Turbo manifest upload failed; falling back to L1: ${e?.message || e}`);
+    const res = await uploadManifestWithArweave(jwk, manifestObj);
+    console.log(`Uploaded (L1) manifest -> ${res.id}`);
+    return res;
+  }
 }
 
 async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
@@ -763,8 +849,8 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   if (!jwk) {
     throw new Error("ARWEAVE_JWK not provided");
   }
-  const turbo = await initTurbo(jwk);
   const today = getTodaySuffix();
+  console.log(`Using upload provider: ${getUploadProvider()}`);
 
   // Idempotency: if we already uploaded today, reuse
   const summaryPath = path.join(dirPath, `upload_summary__${today}.json`);
@@ -792,11 +878,11 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
     throw new Error(`Missing daily artifacts (${missing.join(", ")}); cannot upload manifest`);
   }
 
-  const cardsTxId = await uploadFileWithTurbo(turbo, cardsCsvPath, "text/csv");
-  const profilesTxId = await uploadFileWithTurbo(turbo, profilesCsvPath, "text/csv");
+  const cardsTxId = await uploadFileAuto(cardsCsvPath, "text/csv");
+  const profilesTxId = await uploadFileAuto(profilesCsvPath, "text/csv");
   let aggTxId = null;
   if (CONFIG.buildAgg && fs.existsSync(aggJsonPath)) {
-    aggTxId = await uploadFileWithTurbo(turbo, aggJsonPath, "application/json", [
+    aggTxId = await uploadFileAuto(aggJsonPath, "application/json", [
       { name: "Dataset", value: "collectors_artists_agg" },
     ]);
   }
@@ -818,8 +904,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   if (profilesTxId) manifest.paths["network_profiles.csv"] = { id: profilesTxId };
   if (aggTxId) manifest.paths["collectors_artists_agg.json"] = { id: aggTxId };
 
-  const { id: manifestTxId, json: manifestJson } = await uploadManifestWithTurbo(turbo, manifest);
-  console.log(`Uploaded manifest -> ${manifestTxId}`);
+  const { id: manifestTxId, json: manifestJson } = await uploadManifestAuto(manifest);
 
   const manifestPath = path.join(dirPath, `manifest__${today}.json`);
   fs.writeFileSync(manifestPath, manifestJson, "utf8");
@@ -855,12 +940,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
 
     const antReadableAO = ANT.init({ processId });
     try {
-      // const ownerAO = await antReadableAO.getOwner();
-      // const controllersAO = await antReadableAO.getControllers();
       const rootRecordAO = await antReadableAO.getRecord({ undername: "@" });
-      // console.log(`AO ANT owner: ${ownerAO}`);
-      // console.log(`AO ANT controllers: ${Array.isArray(controllersAO) ? controllersAO.join(",") : controllersAO}`);
-      // console.log(`AO current '@' record: ${rootRecordAO?.transactionId || "<none>"}`);
       if (rootRecordAO?.transactionId === manifestTxId) {
         console.log("ArNS '@' already points to this manifest (AO); skipping setRecord.");
         return null;
@@ -963,7 +1043,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
           await triggerGithubWorkflow({
             owner: "ewharton",
             repo: "tnita-data",
-            workflowFile: "static.yml",
+            workflowFile: "mirror.yml",
             ref: "main",
           });
         } catch (e) {
