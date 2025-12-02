@@ -11,6 +11,7 @@ const CONFIG = {
   failIfDateMismatch: true, // Set false to skip date validation
   // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
   buildAgg: true,
+  filter6529Collections: true,
 };
 
 const ARNS_CONFIG = {
@@ -444,6 +445,11 @@ function processArtistsToCsv(artistsInput, dirPath) {
   for (const artist of artists) {
     const rawName = artist?.name ?? artist?.display_name ?? artist?.artist ?? "";
     const artistName = typeof rawName === "string" ? rawName : String(rawName ?? "");
+    const normalizedArtistName = artistName.trim();
+    if (!normalizedArtistName) continue;
+    if (CONFIG.filter6529Collections && normalizedArtistName === "6529 Collections") {
+      continue;
+    }
     // Extract meme card IDs from the 'memes' array (objects with { id })
     const memeIds = Array.isArray(artist?.memes)
       ? artist.memes
@@ -455,7 +461,7 @@ function processArtistsToCsv(artistsInput, dirPath) {
       const tokenId = String(cardId);
       if (!tokenIdToArtists.has(tokenId)) tokenIdToArtists.set(tokenId, []);
       const list = tokenIdToArtists.get(tokenId);
-      if (!list.includes(artistName)) list.push(artistName);
+      if (!list.includes(normalizedArtistName)) list.push(normalizedArtistName);
     }
   }
 
@@ -467,6 +473,7 @@ function processArtistsToCsv(artistsInput, dirPath) {
   );
 
   for (const [tokenId, names] of sortedEntries) {
+    if (!names.length) continue;
     const escapedNames = names.map((n) => (n.includes(",") ? `"${n}"` : n));
     const artistsField = `"${escapedNames.join(",")}"`;
     const count = names.length;
