@@ -12,7 +12,7 @@ const CONFIG = {
   // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
   buildAgg: true,
   filter6529Collections: true,
-  oneOfOneIsReleased: false,
+  oneOfOneIsReleased: true,
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
