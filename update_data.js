@@ -14,6 +14,8 @@ const CONFIG = {
   filter6529Collections: true,
 };
 
+const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
+
 const ARNS_CONFIG = {
   name: "network-art-test2",
   antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
@@ -386,10 +388,7 @@ async function downloadProfileData(dirPath) {
 
 // --- Download raw artists data (JSON) ---
 async function downloadArtistsRaw(dirPath) {
-  console.log("Downloading artists raw data (all pages)...");
-  let url = "https://api.6529.io/api/artists";
-  const allArtists = [];
-  let page = 1;
+  console.log("Downloading artists raw data (memes/artists_names)...");
 
   try {
     const today = getTodaySuffix();
@@ -403,27 +402,43 @@ async function downloadArtistsRaw(dirPath) {
       return arr;
     }
 
-    while (url) {
-      const json = await fetchJson(url);
-      const pageArtists = Array.isArray(json?.data) ? json.data : [];
-      allArtists.push(...pageArtists);
-      console.log(`Fetched page ${page} with ${pageArtists.length} artists`);
-      url = typeof json?.next === "string" && json.next.length > 0 ? json.next : null;
-      page += 1;
+    const payload = await fetchJson(ARTISTS_NAMES_ENDPOINT);
+    const rawList = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+    if (!Array.isArray(rawList) || rawList.length === 0) {
+      throw new Error("Artists endpoint returned no records");
+    }
+    const normalized = normalizeArtistsNamesPayload(rawList);
+    if (normalized.length === 0) {
+      throw new Error("Artists endpoint records were empty after normalization");
     }
 
-    const toSave = { count: allArtists.length, data: allArtists };
+    const toSave = { count: normalized.length, data: normalized };
     fs.writeFileSync(filePath, JSON.stringify(toSave, null, 2), "utf8");
-    console.log(`Saved ${fileName} with ${allArtists.length} artists`);
+    console.log(`Saved ${fileName} with ${normalized.length} artists`);
 
-    if (allArtists.length === 0) {
-      throw new Error("No artists found in paginated response");
-    }
-    return allArtists;
+    return normalized;
   } catch (err) {
     console.error("Error downloading artists data:", err.message);
     return [];
   }
+}
+
+function normalizeArtistsNamesPayload(rawList) {
+  if (!Array.isArray(rawList)) return [];
+  const results = [];
+  for (const entry of rawList) {
+    const rawName = typeof entry?.name === "string" ? entry.name : entry?.name != null ? String(entry.name) : "";
+    const name = rawName.trim();
+    const idObjects = Array.isArray(entry?.cards)
+      ? entry.cards
+          .map((cardId) => Number(cardId))
+          .filter((cardId) => Number.isFinite(cardId))
+          .map((cardId) => ({ id: cardId }))
+      : [];
+    if (!name && idObjects.length === 0) continue;
+    results.push({ name, memes: idObjects });
+  }
+  return results;
 }
 
 // --- Process artists into cards_to_artists.csv ---
