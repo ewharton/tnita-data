@@ -31,7 +31,7 @@ jobs:
         run: |
           set -e
           mkdir -p public
-          BASE="https://network-art-test2.arweave.net"
+          BASE="https://the-network.arweave.net"
           fetch_one () {
             NAME="$1"
             URL="$BASE/$NAME"

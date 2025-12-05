@@ -12,13 +12,16 @@ const CONFIG = {
   // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
   buildAgg: true,
   filter6529Collections: true,
+  oneOfOneIsReleased: false,
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
 
 const ARNS_CONFIG = {
-  name: "network-art-test2",
-  antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
+  // name: "network-art-test2",
+  // antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
+  name: "the-network",
+  antContractTxId: "c58YY3L7cSXksFGeMyG8Esl0unqNZKp77PmTheNAFtA",
   ttlSeconds: 60,
 };
 
@@ -41,6 +44,14 @@ function ensureDir(dirPath) {
     fs.mkdirSync(dirPath, { recursive: true });
     console.log(`Created directory: ${dirPath}`);
   }
+}
+
+function getConfigUpdateMeta() {
+  const update = {};
+  if (typeof CONFIG.oneOfOneIsReleased === "boolean") {
+    update.oneOfOne = { isReleased: CONFIG.oneOfOneIsReleased };
+  }
+  return Object.keys(update).length ? update : null;
 }
 
 function readJsonSafe(filePath) {
@@ -610,6 +621,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
         totalCards: cardsMap.size,
         snapshot_date: snapshotMeta?.date ?? null,
         snapshot_block: snapshotMeta?.block ?? null,
+        configUpdate: getConfigUpdateMeta(),
       },
       artists: [],
       collectors: [],
@@ -678,6 +690,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
       totalCards: cardsMap.size,
       snapshot_date: snapshotMeta?.date ?? null,
       snapshot_block: snapshotMeta?.block ?? null,
+      configUpdate: getConfigUpdateMeta(),
     },
     artists: compactArtistsList,
     collectors: compactCollectors,
