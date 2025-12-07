@@ -18,8 +18,6 @@ const CONFIG = {
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
 
 const ARNS_CONFIG = {
-  // name: "network-art-test2",
-  // antContractTxId: "UI_MJe2atz6KfFbcnh7OcFCOfJNX9TPxfbzHm85oHcY",
   name: "the-network",
   antContractTxId: "c58YY3L7cSXksFGeMyG8Esl0unqNZKp77PmTheNAFtA",
   ttlSeconds: 60,
@@ -46,7 +44,7 @@ function ensureDir(dirPath) {
   }
 }
 
-function getConfigUpdateMeta() {
+function getConfigUpdatesMeta() {
   const update = {};
   if (typeof CONFIG.oneOfOneIsReleased === "boolean") {
     update.oneOfOne = { isReleased: CONFIG.oneOfOneIsReleased };
@@ -621,7 +619,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
         totalCards: cardsMap.size,
         snapshot_date: snapshotMeta?.date ?? null,
         snapshot_block: snapshotMeta?.block ?? null,
-        configUpdate: getConfigUpdateMeta(),
+        configUpdates: getConfigUpdatesMeta(),
       },
       artists: [],
       collectors: [],
@@ -690,7 +688,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
       totalCards: cardsMap.size,
       snapshot_date: snapshotMeta?.date ?? null,
       snapshot_block: snapshotMeta?.block ?? null,
-      configUpdate: getConfigUpdateMeta(),
+      configUpdates: getConfigUpdatesMeta(),
     },
     artists: compactArtistsList,
     collectors: compactCollectors,
