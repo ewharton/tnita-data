@@ -8,11 +8,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG = {
-  failIfDateMismatch: true, // Set false to skip date validation
-  // When true, build and upload collectors_artists_agg.json (compact) and include in manifest
-  buildAgg: true,
-  filter6529Collections: true,
   oneOfOneIsReleased: false,
+  failIfCardCountMismatch: true, 
+  failIfDateMismatch: true,
+  filter6529Collections: true,
+  addCardsIfMissing: [
+    { name: "Eric Paré", memes: [{ id: 121 }] },
+    { name: "Paradigmstories", memes: [{ id: 241 }] },
+  ],
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
@@ -154,7 +157,6 @@ function ensureJwkPathEnv() {
   }
 }
 
-// --- Trigger GitHub Actions workflow (for local runs with PAT) ---
 async function triggerGithubWorkflow({
   owner = "ewharton",
   repo = "tnita-data",
@@ -228,7 +230,6 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
         }
       } catch (e) {
         console.warn(`Attempt ${i}/${maxAttempts} collectors_artists_agg.json not ready or missing: ${e?.message || e}`);
-        // If CONFIG.buildAgg was false or agg not uploaded, verification cannot proceed from this source.
       }
       await delay(retryDelayMs);
     }
@@ -421,6 +422,51 @@ async function downloadArtistsRaw(dirPath) {
       throw new Error("Artists endpoint records were empty after normalization");
     }
 
+    // Optionally patch in any known missing artists/cards if the API omitted them
+    const normalizeMemes = (list) =>
+      Array.isArray(list)
+        ? list
+            .map((m) => (m && typeof m === "object" ? m.id : m))
+            .filter((id) => Number.isFinite(Number(id)))
+            .map((id) => ({ id: Number(id) }))
+        : [];
+
+    const nameToIndex = new Map();
+    normalized.forEach((a, idx) => {
+      const n = a?.name != null ? String(a.name).trim() : "";
+      if (n) nameToIndex.set(n, idx);
+    });
+
+    const extras = Array.isArray(CONFIG.addCardsIfMissing) ? CONFIG.addCardsIfMissing : [];
+    for (const extra of extras) {
+      const name = typeof extra?.name === "string" ? extra.name.trim() : "";
+      if (!name) continue;
+      const memes = normalizeMemes(extra?.memes);
+      if (memes.length === 0) continue;
+
+      const existingIdx = nameToIndex.get(name);
+      if (existingIdx != null) {
+        const existingMemes = Array.isArray(normalized[existingIdx]?.memes) ? normalized[existingIdx].memes : [];
+        const existingIds = new Set(existingMemes.map((m) => m?.id).filter((id) => Number.isFinite(Number(id))));
+        let added = 0;
+        for (const m of memes) {
+          if (!existingIds.has(m.id)) {
+            existingMemes.push(m);
+            existingIds.add(m.id);
+            added++;
+          }
+        }
+        normalized[existingIdx].memes = existingMemes;
+        if (added > 0) {
+          console.log(`Added ${added} missing meme(s) for artist from config: ${name}`);
+        }
+      } else {
+        normalized.push({ name, memes });
+        nameToIndex.set(name, normalized.length - 1);
+        console.log(`Added missing artist from config: ${name}`);
+      }
+    }
+
     const toSave = { count: normalized.length, data: normalized };
     fs.writeFileSync(filePath, JSON.stringify(toSave, null, 2), "utf8");
     console.log(`Saved ${fileName} with ${normalized.length} artists`);
@@ -610,6 +656,20 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
   const profilesMap = await loadProfilesMapFromFile(profilesCsvPath);
   const { cardsMap, artistFirstTokenId } = await loadCardsMapFromFile(cardsCsvPath);
 
+  const cardCount = cardsMap.size;
+  let maxTokenId = 0;
+  for (const tid of cardsMap.keys()) {
+    const n = Number(tid);
+    if (Number.isFinite(n) && n > maxTokenId) maxTokenId = n;
+  }
+  const expectedCardCount = maxTokenId;
+  const cardCountMismatch = cardCount !== expectedCardCount;
+  if (CONFIG.failIfCardCountMismatch && cardCountMismatch) {
+    throw new Error(
+      `Card count mismatch: totalCards=${cardCount} expected=${expectedCardCount}`
+    );
+  }
+
   const text = fs.readFileSync(collectorsCsvPath, "utf8");
   const lines = text.split("\n");
   if (lines.length < 2) {
@@ -617,6 +677,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
       meta: {
         generated_at: new Date().toISOString(),
         totalCards: cardsMap.size,
+        expectedCardCount,
         snapshot_date: snapshotMeta?.date ?? null,
         snapshot_block: snapshotMeta?.block ?? null,
         configUpdates: getConfigUpdatesMeta(),
@@ -686,6 +747,7 @@ async function buildAggCompact({ collectorsCsvPath, profilesCsvPath, cardsCsvPat
     meta: {
       generated_at: new Date().toISOString(),
       totalCards: cardsMap.size,
+      expectedCardCount,
       snapshot_date: snapshotMeta?.date ?? null,
       snapshot_block: snapshotMeta?.block ?? null,
       configUpdates: getConfigUpdatesMeta(),
@@ -905,6 +967,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   const missing = [];
   if (!fs.existsSync(cardsCsvPath)) missing.push(path.basename(cardsCsvPath));
   if (!fs.existsSync(profilesCsvPath)) missing.push(path.basename(profilesCsvPath));
+  if (!fs.existsSync(aggJsonPath)) missing.push(path.basename(aggJsonPath));
 
   // Fail early if required artifacts are missing
   if (missing.length > 0) {
@@ -913,12 +976,18 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
 
   const cardsTxId = await uploadFileAuto(cardsCsvPath, "text/csv");
   const profilesTxId = await uploadFileAuto(profilesCsvPath, "text/csv");
-  let aggTxId = null;
-  if (CONFIG.buildAgg && fs.existsSync(aggJsonPath)) {
-    aggTxId = await uploadFileAuto(aggJsonPath, "application/json", [
-      { name: "Dataset", value: "collectors_artists_agg" },
-    ]);
+  const aggTxId = await uploadFileAuto(aggJsonPath, "application/json", [
+    { name: "Dataset", value: "collectors_artists_agg" },
+  ]);
+
+  // Include card count meta for consistency
+  const { cardsMap } = await loadCardsMapFromFile(cardsCsvPath);
+  let maxTokenId = 0;
+  for (const tid of cardsMap.keys()) {
+    const n = Number(tid);
+    if (Number.isFinite(n) && n > maxTokenId) maxTokenId = n;
   }
+  const manifestExpectedCardCount = maxTokenId;
 
   // Build manifest using available IDs
   const manifest = {
@@ -931,6 +1000,8 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
     metadata: {
       date: snapshotMeta.date,
       block: snapshotMeta.block,
+      totalCards: cardsMap.size,
+      expectedCardCount: manifestExpectedCardCount,
     },
   };
   if (cardsTxId) manifest.paths["cards_to_artists.csv"] = { id: cardsTxId };
@@ -1008,25 +1079,19 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
     const snapshotMeta = await downloadAndValidateSnapshot();
     await downloadCollectorsCsvFromArweave(dirPath, snapshotMeta.txnId);
 
-    // Optionally build aggregated compact JSON
-    if (CONFIG.buildAgg) {
-      try {
-        const profilesCsv = path.join(dirPath, `network_profiles__${today}.csv`);
-        const cardsCsv = path.join(dirPath, `cards_to_artists__${today}.csv`);
-        const collectorsCsv = path.join(dirPath, "collectors_cards.csv");
-        const aggObj = await buildAggCompact({
-          collectorsCsvPath: collectorsCsv,
-          profilesCsvPath: profilesCsv,
-          cardsCsvPath: cardsCsv,
-          snapshotMeta,
-        });
-        const aggOutPath = path.join(dirPath, "collectors_artists_agg.json");
-        writeJsonMin(aggOutPath, aggObj);
-        console.log(`Wrote collectors_artists_agg.json with ${aggObj.collectors.length} collectors, ${aggObj.artists.length} artists`);
-      } catch (e) {
-        console.error("Failed to build collectors_artists_agg.json:", e?.message || e);
-      }
-    }
+    // Build aggregated JSON 
+    const profilesCsv = path.join(dirPath, `network_profiles__${today}.csv`);
+    const cardsCsv = path.join(dirPath, `cards_to_artists__${today}.csv`);
+    const collectorsCsv = path.join(dirPath, "collectors_cards.csv");
+    const aggObj = await buildAggCompact({
+      collectorsCsvPath: collectorsCsv,
+      profilesCsvPath: profilesCsv,
+      cardsCsvPath: cardsCsv,
+      snapshotMeta,
+    });
+    const aggOutPath = path.join(dirPath, "collectors_artists_agg.json");
+    writeJsonMin(aggOutPath, aggObj);
+    console.log(`Wrote collectors_artists_agg.json with ${aggObj.collectors.length} collectors, ${aggObj.artists.length} artists`);
 
     // Determine if we already uploaded a manifest today
     const summaryPath = path.join(dirPath, `upload_summary__${today}.json`);
