@@ -13,6 +13,7 @@ const CONFIG = {
   failIfDateMismatch: true,
   filter6529Collections: true,
   addCardsIfMissing: [
+    { name: "cyberh49", memes: [{ id: 53 }] },
     { name: "Eric Paré", memes: [{ id: 121 }] },
     { name: "Paradigmstories", memes: [{ id: 241 }] },
   ],
