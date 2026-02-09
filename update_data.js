@@ -12,14 +12,19 @@ const CONFIG = {
   failIfCardCountMismatch: true, 
   failIfDateMismatch: true,
   filter6529Collections: true,
-  addCardsIfMissing: [
-    { name: "cyberh49", memes: [{ id: 53 }] },
-    { name: "Eric Paré", memes: [{ id: 121 }] },
-    { name: "Paradigmstories", memes: [{ id: 241 }] },
-  ],
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
+const ARTISTS_BACKUP_DATE = "01_27_2026";
+// const ARTISTS_BACKUP_DATE = "02_09_2026";
+const ARTISTS_BACKUP_FILENAME = `all_artists_backup_on_${ARTISTS_BACKUP_DATE}.json`;
+const ARTISTS_BACKUP_PATH = path.join(__dirname, ARTISTS_BACKUP_FILENAME);
+const LEGACY_ARTISTS_BACKUP_PATH = path.join(
+  __dirname,
+  "data",
+  ARTISTS_BACKUP_DATE,
+  `artists_raw__${ARTISTS_BACKUP_DATE}.json`
+);
 
 const ARNS_CONFIG = {
   name: "the-network",
@@ -63,6 +68,41 @@ function readJsonSafe(filePath) {
     }
   } catch {}
   return null;
+}
+
+function extractArtistsArray(payload) {
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload)) return payload;
+  return [];
+}
+
+function ensureArtistsBackupFile() {
+  if (fs.existsSync(ARTISTS_BACKUP_PATH)) return ARTISTS_BACKUP_PATH;
+  if (fs.existsSync(LEGACY_ARTISTS_BACKUP_PATH)) {
+    try {
+      fs.renameSync(LEGACY_ARTISTS_BACKUP_PATH, ARTISTS_BACKUP_PATH);
+      console.log(`Moved artists backup to ${ARTISTS_BACKUP_FILENAME}`);
+      return ARTISTS_BACKUP_PATH;
+    } catch (err) {
+      console.warn(`Failed to move artists backup: ${err?.message || err}`);
+    }
+  }
+  return null;
+}
+
+function loadArtistsBackup() {
+  const backupPath = ensureArtistsBackupFile();
+  if (!backupPath) {
+    console.warn(`Artists backup not found (${ARTISTS_BACKUP_FILENAME}); skipping backup merge.`);
+    return [];
+  }
+  const parsed = readJsonSafe(backupPath);
+  if (!parsed) {
+    console.warn(`Artists backup could not be read (${ARTISTS_BACKUP_FILENAME}); skipping backup merge.`);
+    return [];
+  }
+  const list = extractArtistsArray(parsed);
+  return normalizeArtistsNamesPayload(list);
 }
 
 function writeJsonSafe(filePath, obj) {
@@ -414,7 +454,7 @@ async function downloadArtistsRaw(dirPath) {
     }
 
     const payload = await fetchJson(ARTISTS_NAMES_ENDPOINT);
-    const rawList = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+    const rawList = extractArtistsArray(payload);
     if (!Array.isArray(rawList) || rawList.length === 0) {
       throw new Error("Artists endpoint returned no records");
     }
@@ -423,48 +463,16 @@ async function downloadArtistsRaw(dirPath) {
       throw new Error("Artists endpoint records were empty after normalization");
     }
 
-    // Optionally patch in any known missing artists/cards if the API omitted them
-    const normalizeMemes = (list) =>
-      Array.isArray(list)
-        ? list
-            .map((m) => (m && typeof m === "object" ? m.id : m))
-            .filter((id) => Number.isFinite(Number(id)))
-            .map((id) => ({ id: Number(id) }))
-        : [];
-
-    const nameToIndex = new Map();
-    normalized.forEach((a, idx) => {
-      const n = a?.name != null ? String(a.name).trim() : "";
-      if (n) nameToIndex.set(n, idx);
-    });
-
-    const extras = Array.isArray(CONFIG.addCardsIfMissing) ? CONFIG.addCardsIfMissing : [];
-    for (const extra of extras) {
-      const name = typeof extra?.name === "string" ? extra.name.trim() : "";
-      if (!name) continue;
-      const memes = normalizeMemes(extra?.memes);
-      if (memes.length === 0) continue;
-
-      const existingIdx = nameToIndex.get(name);
-      if (existingIdx != null) {
-        const existingMemes = Array.isArray(normalized[existingIdx]?.memes) ? normalized[existingIdx].memes : [];
-        const existingIds = new Set(existingMemes.map((m) => m?.id).filter((id) => Number.isFinite(Number(id))));
-        let added = 0;
-        for (const m of memes) {
-          if (!existingIds.has(m.id)) {
-            existingMemes.push(m);
-            existingIds.add(m.id);
-            added++;
-          }
-        }
-        normalized[existingIdx].memes = existingMemes;
-        if (added > 0) {
-          console.log(`Added ${added} missing meme(s) for artist from config: ${name}`);
-        }
+    // Patch any missing artists/cards by comparing to the larger backup set
+    const backupArtists = loadArtistsBackup();
+    if (backupArtists.length > 0) {
+      const { addedArtists, addedMemes } = mergeArtistsWithBackup(normalized, backupArtists);
+      if (addedArtists || addedMemes) {
+        console.log(
+          `Filled ${addedMemes} missing meme(s) across ${addedArtists} missing artist(s) using ${ARTISTS_BACKUP_FILENAME}`
+        );
       } else {
-        normalized.push({ name, memes });
-        nameToIndex.set(name, normalized.length - 1);
-        console.log(`Added missing artist from config: ${name}`);
+        console.log(`No missing memes found versus ${ARTISTS_BACKUP_FILENAME}`);
       }
     }
 
@@ -485,8 +493,14 @@ function normalizeArtistsNamesPayload(rawList) {
   for (const entry of rawList) {
     const rawName = typeof entry?.name === "string" ? entry.name : entry?.name != null ? String(entry.name) : "";
     const name = rawName.trim();
-    const idObjects = Array.isArray(entry?.cards)
+    const rawCards = Array.isArray(entry?.cards)
       ? entry.cards
+      : Array.isArray(entry?.memes)
+        ? entry.memes
+        : [];
+    const idObjects = Array.isArray(rawCards)
+      ? rawCards
+          .map((cardId) => (cardId && typeof cardId === "object" ? cardId.id : cardId))
           .map((cardId) => Number(cardId))
           .filter((cardId) => Number.isFinite(cardId))
           .map((cardId) => ({ id: cardId }))
@@ -495,6 +509,65 @@ function normalizeArtistsNamesPayload(rawList) {
     results.push({ name, memes: idObjects });
   }
   return results;
+}
+
+function mergeArtistsWithBackup(targetArtists, backupArtists) {
+  const nameToIndex = new Map();
+  targetArtists.forEach((a, idx) => {
+    const n = a?.name != null ? String(a.name).trim() : "";
+    if (n) nameToIndex.set(n, idx);
+  });
+
+  let addedArtists = 0;
+  let addedMemes = 0;
+
+  for (const backup of backupArtists) {
+    const name = backup?.name != null ? String(backup.name).trim() : "";
+    if (!name) continue;
+    const backupMemes = Array.isArray(backup?.memes) ? backup.memes : [];
+
+    const existingIdx = nameToIndex.get(name);
+    if (existingIdx == null) {
+      if (backupMemes.length === 0) continue;
+      console.log(
+        `Missing artist "${name}" found in backup; adding cards: ${backupMemes
+          .map((m) => m?.id)
+          .filter((id) => Number.isFinite(Number(id)))
+          .join(", ")}`
+      );
+      targetArtists.push({ name, memes: backupMemes });
+      nameToIndex.set(name, targetArtists.length - 1);
+      addedArtists += 1;
+      addedMemes += backupMemes.length;
+      continue;
+    }
+
+    const existingMemes = Array.isArray(targetArtists[existingIdx]?.memes)
+      ? targetArtists[existingIdx].memes
+      : [];
+    const existingIds = new Set(
+      existingMemes.map((m) => m?.id).filter((id) => Number.isFinite(Number(id)))
+    );
+    const missingIds = [];
+    for (const m of backupMemes) {
+      const id = Number(m?.id);
+      if (!Number.isFinite(id)) continue;
+      if (!existingIds.has(id)) {
+        existingMemes.push({ id });
+        existingIds.add(id);
+        missingIds.push(id);
+        addedMemes += 1;
+      }
+    }
+    targetArtists[existingIdx].memes = existingMemes;
+    if (missingIds.length > 0) {
+      console.log(
+        `Missing cards for "${name}": ${missingIds.sort((a, b) => a - b).join(", ")}`
+      );
+    }
+  }
+
+  return { addedArtists, addedMemes };
 }
 
 // --- Process artists into cards_to_artists.csv ---
@@ -1152,6 +1225,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
     }
 
     console.log("Update complete.");
+    process.exit(0);
   } catch (err) {
     console.error("Fatal error:", err.message);
     process.exit(1);
