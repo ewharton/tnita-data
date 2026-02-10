@@ -12,11 +12,13 @@ const CONFIG = {
   failIfCardCountMismatch: true, 
   failIfDateMismatch: true,
   filter6529Collections: true,
+  addBackupArtistInfo: true,
+  applyArtistExclusionList: true,
+  artistExclusionList: ["HugoFaz", "DreDogue"],
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
 const ARTISTS_BACKUP_DATE = "01_27_2026";
-// const ARTISTS_BACKUP_DATE = "02_09_2026";
 const ARTISTS_BACKUP_FILENAME = `all_artists_backup_on_${ARTISTS_BACKUP_DATE}.json`;
 const ARTISTS_BACKUP_PATH = path.join(__dirname, ARTISTS_BACKUP_FILENAME);
 const LEGACY_ARTISTS_BACKUP_PATH = path.join(
@@ -25,6 +27,7 @@ const LEGACY_ARTISTS_BACKUP_PATH = path.join(
   ARTISTS_BACKUP_DATE,
   `artists_raw__${ARTISTS_BACKUP_DATE}.json`
 );
+const exclusionLogCache = new Set();
 
 const ARNS_CONFIG = {
   name: "the-network",
@@ -458,22 +461,28 @@ async function downloadArtistsRaw(dirPath) {
     if (!Array.isArray(rawList) || rawList.length === 0) {
       throw new Error("Artists endpoint returned no records");
     }
-    const normalized = normalizeArtistsNamesPayload(rawList);
+    let normalized = normalizeArtistsNamesPayload(rawList);
     if (normalized.length === 0) {
       throw new Error("Artists endpoint records were empty after normalization");
     }
+    normalized = filterArtistsByName(normalized, "api");
 
     // Patch any missing artists/cards by comparing to the larger backup set
-    const backupArtists = loadArtistsBackup();
-    if (backupArtists.length > 0) {
-      const { addedArtists, addedMemes } = mergeArtistsWithBackup(normalized, backupArtists);
-      if (addedArtists || addedMemes) {
-        console.log(
-          `Filled ${addedMemes} missing meme(s) across ${addedArtists} missing artist(s) using ${ARTISTS_BACKUP_FILENAME}`
-        );
-      } else {
-        console.log(`No missing memes found versus ${ARTISTS_BACKUP_FILENAME}`);
+    if (CONFIG.addBackupArtistInfo) {
+      const backupArtistsRaw = loadArtistsBackup();
+      const backupArtists = filterArtistsByName(backupArtistsRaw, "backup");
+      if (backupArtists.length > 0) {
+        const { addedArtists, addedMemes } = mergeArtistsWithBackup(normalized, backupArtists);
+        if (addedArtists || addedMemes) {
+          console.log(
+            `Filled ${addedMemes} missing meme(s) across ${addedArtists} missing artist(s) using ${ARTISTS_BACKUP_FILENAME}`
+          );
+        } else {
+          console.log(`No missing memes found versus ${ARTISTS_BACKUP_FILENAME}`);
+        }
       }
+    } else {
+      console.log("Backup artist merge skipped (CONFIG.addBackupArtistInfo=false).");
     }
 
     const toSave = { count: normalized.length, data: normalized };
@@ -509,6 +518,32 @@ function normalizeArtistsNamesPayload(rawList) {
     results.push({ name, memes: idObjects });
   }
   return results;
+}
+
+function filterArtistsByName(artists, sourceLabel = "") {
+  if (!CONFIG.applyArtistExclusionList) return artists;
+  const list = Array.isArray(CONFIG.artistExclusionList) ? CONFIG.artistExclusionList : [];
+  if (list.length === 0) return artists;
+  const blocked = new Set(list.map((n) => String(n).trim()).filter(Boolean));
+  if (blocked.size === 0) return artists;
+  return artists.filter((artist) => {
+    const name = artist?.name != null ? String(artist.name).trim() : "";
+    if (!name || !blocked.has(name)) return Boolean(name);
+    const ids = Array.isArray(artist?.memes)
+      ? artist.memes
+          .map((m) => m?.id)
+          .filter((id) => Number.isFinite(Number(id)))
+          .sort((a, b) => Number(a) - Number(b))
+      : [];
+    const idsText = ids.length > 0 ? ` cards: ${ids.join(", ")}` : " (no cards)";
+    const sourceText = sourceLabel ? ` [${sourceLabel}]` : "";
+    const cacheKey = `${name}|${idsText}`;
+    if (!exclusionLogCache.has(cacheKey)) {
+      exclusionLogCache.add(cacheKey);
+      console.log(`Excluded artist "${name}" from list${sourceText};${idsText}`);
+    }
+    return false;
+  });
 }
 
 function mergeArtistsWithBackup(targetArtists, backupArtists) {
