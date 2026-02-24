@@ -27,7 +27,34 @@ jobs:
       - name: Run updater
         run: node update_data.js
 
+      - name: Job summary (success)
+        if: success()
+        run: |
+          AGG=$(ls data/*/collectors_artists_agg.json 2>/dev/null | head -1)
+          if [ -n "$AGG" ]; then
+            echo "## Update completed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Snapshot date | $(jq -r '.meta.snapshot_date // "—"' "$AGG") |" >> $GITHUB_STEP_SUMMARY
+            echo "| Total cards | $(jq -r '.meta.totalCards // "—"' "$AGG") |" >> $GITHUB_STEP_SUMMARY
+            echo "| Artists | $(jq -r '.artists | length' "$AGG") |" >> $GITHUB_STEP_SUMMARY
+            echo "| Collectors | $(jq -r '.collectors | length' "$AGG") |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Artifacts saved to \`data/\` and uploaded as workflow artifacts." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Update completed. See logs for details." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Job summary (failure)
+        if: failure()
+        run: |
+          echo "## Workflow failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts have been uploaded for debugging. Download the \`data-*\` artifact." >> $GITHUB_STEP_SUMMARY
+
       - name: Upload data artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: data-${{ github.run_id }}
