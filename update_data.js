@@ -8,17 +8,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG = {
-  oneOfOneIsReleased: false,
   failIfCardCountMismatch: true, 
   failIfDateMismatch: true,
   filter6529Collections: true,
   addBackupArtistInfo: true,
-  applyArtistExclusionList: true,
+  applyArtistExclusionList: false,
   artistExclusionList: ["HugoFaz", "DreDogue"],
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
-const ARTISTS_BACKUP_DATE = "01_27_2026";
+const ARTISTS_BACKUP_DATE = "02_24_2026";
 const ARTISTS_BACKUP_FILENAME = `all_artists_backup_on_${ARTISTS_BACKUP_DATE}.json`;
 const ARTISTS_BACKUP_PATH = path.join(__dirname, ARTISTS_BACKUP_FILENAME);
 const LEGACY_ARTISTS_BACKUP_PATH = path.join(
@@ -56,12 +55,16 @@ function ensureDir(dirPath) {
   }
 }
 
+// config_updates.json: nested keys match network_art config paths.
+// Add/edit keys to override; delete a key to revert to default.
+const CONFIG_UPDATES_PATH = path.join(__dirname, "config_updates.json");
+
 function getConfigUpdatesMeta() {
-  const update = {};
-  if (typeof CONFIG.oneOfOneIsReleased === "boolean") {
-    update.oneOfOne = { isReleased: CONFIG.oneOfOneIsReleased };
-  }
-  return Object.keys(update).length ? update : null;
+  const parsed = readJsonSafe(CONFIG_UPDATES_PATH);
+  if (!parsed || typeof parsed !== "object") return null;
+  const keys = Object.keys(parsed);
+  if (keys.length === 0) return null;
+  return parsed;
 }
 
 function readJsonSafe(filePath) {
@@ -457,6 +460,10 @@ async function downloadArtistsRaw(dirPath) {
     }
 
     const payload = await fetchJson(ARTISTS_NAMES_ENDPOINT);
+    const rawApiPath = path.join(dirPath, `artists_api_raw__${today}.json`);
+    writeJsonSafe(rawApiPath, payload);
+    console.log(`Saved raw API snapshot: artists_api_raw__${today}.json`);
+
     const rawList = extractArtistsArray(payload);
     if (!Array.isArray(rawList) || rawList.length === 0) {
       throw new Error("Artists endpoint returned no records");
