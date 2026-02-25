@@ -3,6 +3,12 @@
   "ownerMode": {
     "memeOwners": {
       "tokenId": "443"
+    },
+    "controls": {
+      "maxVerticalAR": 0.85
     }
+  },
+  "COLORS": {
+    "memeText": [0, 40, 65]
   }
 }
