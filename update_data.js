@@ -55,8 +55,6 @@ function ensureDir(dirPath) {
   }
 }
 
-// config_updates.json: nested keys match network_art config paths.
-// Add/edit keys to override; delete a key to revert to default.
 const CONFIG_UPDATES_PATH = path.join(__dirname, "config_updates.json");
 
 function getConfigUpdatesMeta() {
@@ -233,7 +231,7 @@ async function triggerGithubWorkflow({
 }
 
 
-async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false } = {}) {
+async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false, generated_at: expectedGeneratedAt } = {}) {
   const ttlSeconds = Number(ARNS_CONFIG.ttlSeconds);
   const bufferSeconds = 40;
   const waitMs = (ttlSeconds + bufferSeconds) * 1000;
@@ -258,11 +256,17 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
     }
 
     // Verify via collectors_artists_agg.json path (reads meta.snapshot_date)
-    const maxAttempts = 5; 
-    const retryDelayMs = 5000;
+    const maxAttempts = 8; 
+    const retryDelayMs = 120000;
     for (let i = 1; i <= maxAttempts; i++) {
       try {
         const agg = await fetchJsonFollowRedirects(`https://arweave.net/${manifestTxId}/collectors_artists_agg.json`);
+        const gotGeneratedAt = agg?.meta?.generated_at;
+        console.log(`collectors_artists_agg.meta.generated_at: ${gotGeneratedAt || '<none>'}`);
+        if (expectedGeneratedAt != null) {
+          const genAtMatch = gotGeneratedAt === expectedGeneratedAt;
+          console.log(`generated_at match: ${genAtMatch ? 'yes' : 'no'} (expected: ${expectedGeneratedAt})`);
+        }
         const got = agg?.meta?.snapshot_date;
         const expected = getTodayCompact();
         if (got === expected) {
@@ -1242,7 +1246,10 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       if (uploadedNewManifest && !arnsTx) {
         throw new Error("ARNS update failed (no txId) after manifest upload");
       }
-      const verification = await verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate: CONFIG.failIfDateMismatch });
+      const verification = await verifyArnsAndManifestAfterTtl(manifestTxId, {
+        earlyExitOnMismatchedDate: CONFIG.failIfDateMismatch,
+        generated_at: aggObj.meta.generated_at,
+      });
       const expectedDate = getTodayCompact();
       const dateMismatch = verification?.date && verification.date !== expectedDate;
       if (uploadedNewManifest && CONFIG.failIfDateMismatch && (dateMismatch || !verification?.ok)) {
