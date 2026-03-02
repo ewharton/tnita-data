@@ -59,16 +59,7 @@ jobs:
             return 1
           }
 
-          FAILED=0
-          fetch_one collectors_cards.csv || FAILED=1
-          fetch_one cards_to_artists.csv || FAILED=1
-          fetch_one network_profiles.csv || FAILED=1
-          fetch_one collectors_artists_agg.json || FAILED=1
-
-          if [ "$FAILED" -ne 0 ]; then
-            echo "FATAL: One or more files could not be fetched. Aborting to preserve existing data."
-            exit 1
-          fi
+          fetch_one collectors_artists_agg.json
 
           # Validate snapshot_date if provided
           if [ -n "$SNAPSHOT_DATE" ]; then
