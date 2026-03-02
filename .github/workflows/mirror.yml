@@ -8,6 +8,9 @@ on:
       snapshot_date:
         description: "Expected snapshot_date (YYYYMMDD) for validation"
         required: false
+      agg_tx_id:
+        description: "Direct aggTxId fallback (used only if ArNS serves stale data)"
+        required: false
   push:
     branches: [ main ]
     paths:
@@ -31,7 +34,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch data files via ArNS with gateway fallback
+      - name: Fetch collectors_artists_agg.json via ArNS with gateway fallback
         run: |
           set -e
           mkdir -p public
@@ -39,43 +42,71 @@ jobs:
           ARNS_NAME="the-network"
           GATEWAYS="arweave.net ar-io.dev vilenarios.com arweave.fllstck.dev g8way.io"
           SNAPSHOT_DATE="${{ inputs.snapshot_date }}"
+          AGG_TX_ID="${{ inputs.agg_tx_id }}"
+          OUT="public/collectors_artists_agg.json"
 
-          # fetch_one: try ArNS name on each gateway until one succeeds
-          fetch_one () {
-            local NAME="$1"
-            local OUT="public/$NAME"
-            echo "Fetching $NAME ..."
+          # check_date: validate snapshot_date in a fetched file. Returns 0 if valid.
+          check_date () {
+            local FILE="$1"
+            if [ -z "$SNAPSHOT_DATE" ]; then
+              return 0
+            fi
+            GOT=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('meta',{}).get('snapshot_date',''))" < "$FILE")
+            if [ "$GOT" = "$SNAPSHOT_DATE" ]; then
+              echo "    snapshot_date validated: $GOT"
+              return 0
+            else
+              echo "    STALE: snapshot_date='$GOT' expected='$SNAPSHOT_DATE'"
+              return 1
+            fi
+          }
+
+          # Phase 1: Try ArNS on each gateway, validate date on every response
+          echo "Phase 1: Fetching via ArNS ..."
+          FOUND=false
+          for GW in $GATEWAYS; do
+            URL="https://${ARNS_NAME}.${GW}/collectors_artists_agg.json"
+            echo "  Trying $URL"
+            if curl -fsSL --retry 2 --retry-delay 3 --max-time 120 "$URL" -o "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
+              echo "  Got response via $GW ($(wc -c < "$OUT.tmp") bytes)"
+              if check_date "$OUT.tmp"; then
+                mv "$OUT.tmp" "$OUT"
+                FOUND=true
+                break
+              fi
+            fi
+            rm -f "$OUT.tmp"
+          done
+
+          # Phase 2: If ArNS served stale data and agg_tx_id was provided, try direct txId
+          if [ "$FOUND" = false ] && [ -n "$AGG_TX_ID" ]; then
+            echo ""
+            echo "Phase 2: ArNS stale or unavailable. Trying direct aggTxId $AGG_TX_ID ..."
             for GW in $GATEWAYS; do
-              URL="https://${ARNS_NAME}.${GW}/${NAME}"
+              URL="https://${GW}/${AGG_TX_ID}"
               echo "  Trying $URL"
               if curl -fsSL --retry 2 --retry-delay 3 --max-time 120 "$URL" -o "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
-                mv "$OUT.tmp" "$OUT"
-                echo "  OK via $GW ($(wc -c < "$OUT") bytes)"
-                return 0
+                echo "  Got response via $GW ($(wc -c < "$OUT.tmp") bytes)"
+                if check_date "$OUT.tmp"; then
+                  mv "$OUT.tmp" "$OUT"
+                  FOUND=true
+                  break
+                fi
               fi
               rm -f "$OUT.tmp"
             done
-            echo "  FAILED to fetch $NAME from any gateway"
-            return 1
-          }
-
-          fetch_one collectors_artists_agg.json
-
-          # Validate snapshot_date if provided
-          if [ -n "$SNAPSHOT_DATE" ]; then
-            GOT_DATE=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('meta',{}).get('snapshot_date',''))" < public/collectors_artists_agg.json)
-            if [ "$GOT_DATE" != "$SNAPSHOT_DATE" ]; then
-              echo "FATAL: snapshot_date mismatch: got='$GOT_DATE' expected='$SNAPSHOT_DATE'"
-              echo "Aborting to preserve existing data."
-              exit 1
-            fi
-            echo "snapshot_date validated: $GOT_DATE"
-          else
-            echo "WARN: No snapshot_date input provided, skipping date validation"
           fi
 
+          if [ "$FOUND" = false ]; then
+            echo ""
+            echo "FATAL: Could not fetch fresh collectors_artists_agg.json from any source."
+            echo "Aborting to preserve existing data."
+            exit 1
+          fi
+
+          echo ""
           echo "Mirror updated at $(date -u)" > public/index.html
-          echo "All files fetched and validated successfully."
+          echo "Mirror fetch complete."
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

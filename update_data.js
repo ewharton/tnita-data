@@ -8,12 +8,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG = {
-  failIfCardCountMismatch: true, 
+  failIfCardCountMismatch: true,
   failIfDateMismatch: true,
   filter6529Collections: true,
   addBackupArtistInfo: true,
   applyArtistExclusionList: false,
   artistExclusionList: ["HugoFaz", "DreDogue"],
+  allowMirrorFromAggTxId: true,
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
@@ -1314,6 +1315,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
             ref: "main",
             inputs: {
               snapshot_date: getTodayCompact(),
+              ...(CONFIG.allowMirrorFromAggTxId && aggTxId ? { agg_tx_id: aggTxId } : {}),
             },
           });
         } catch (e) {
