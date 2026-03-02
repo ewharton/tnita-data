@@ -4,5 +4,9 @@
     "memeOwners": {
       "tokenId": "443"
     }
+  },
+  "controls": {
+    "maxVerticalAR": 0.8,
+    "forceResizeOnConfigUpdate": true
   }
 }
