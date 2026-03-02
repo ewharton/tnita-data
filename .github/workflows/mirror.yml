@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "0 0 29 2 *"   # temporarily disabled: runs only on Feb 29
   workflow_dispatch:
+    inputs:
+      snapshot_date:
+        description: "Expected snapshot_date (YYYYMMDD) for validation"
+        required: false
   push:
     branches: [ main ]
     paths:
@@ -27,34 +31,60 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch CSVs from ARNS base with retry; keep prior on failure
+      - name: Fetch data files via ArNS with gateway fallback
         run: |
           set -e
           mkdir -p public
-          BASE="https://the-network.arweave.net"
+
+          ARNS_NAME="the-network"
+          GATEWAYS="arweave.net ar-io.dev vilenarios.com arweave.fllstck.dev g8way.io"
+          SNAPSHOT_DATE="${{ inputs.snapshot_date }}"
+
+          # fetch_one: try ArNS name on each gateway until one succeeds
           fetch_one () {
-            NAME="$1"
-            URL="$BASE/$NAME"
-            echo "Fetching $URL"
-            curl -fsSL --retry 3 --retry-delay 5 --max-time 90 "$URL" -o "public/$NAME.tmp" || true
-            if [ -s "public/$NAME.tmp" ]; then
-              mv "public/$NAME.tmp" "public/$NAME"
-              echo "Updated public/$NAME"
-            else
-              rm -f "public/$NAME.tmp"
-              if [ -s "public/$NAME" ]; then
-                echo "Keeping existing public/$NAME (fetch failed)"
-              else
-                echo "No existing public/$NAME and fetch failed. Exiting."
-                exit 22
+            local NAME="$1"
+            local OUT="public/$NAME"
+            echo "Fetching $NAME ..."
+            for GW in $GATEWAYS; do
+              URL="https://${ARNS_NAME}.${GW}/${NAME}"
+              echo "  Trying $URL"
+              if curl -fsSL --retry 2 --retry-delay 3 --max-time 120 "$URL" -o "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
+                mv "$OUT.tmp" "$OUT"
+                echo "  OK via $GW ($(wc -c < "$OUT") bytes)"
+                return 0
               fi
-            fi
+              rm -f "$OUT.tmp"
+            done
+            echo "  FAILED to fetch $NAME from any gateway"
+            return 1
           }
-          fetch_one collectors_cards.csv
-          fetch_one cards_to_artists.csv
-          fetch_one network_profiles.csv
-          fetch_one collectors_artists_agg.json
+
+          FAILED=0
+          fetch_one collectors_cards.csv || FAILED=1
+          fetch_one cards_to_artists.csv || FAILED=1
+          fetch_one network_profiles.csv || FAILED=1
+          fetch_one collectors_artists_agg.json || FAILED=1
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "FATAL: One or more files could not be fetched. Aborting to preserve existing data."
+            exit 1
+          fi
+
+          # Validate snapshot_date if provided
+          if [ -n "$SNAPSHOT_DATE" ]; then
+            GOT_DATE=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('meta',{}).get('snapshot_date',''))" < public/collectors_artists_agg.json)
+            if [ "$GOT_DATE" != "$SNAPSHOT_DATE" ]; then
+              echo "FATAL: snapshot_date mismatch: got='$GOT_DATE' expected='$SNAPSHOT_DATE'"
+              echo "Aborting to preserve existing data."
+              exit 1
+            fi
+            echo "snapshot_date validated: $GOT_DATE"
+          else
+            echo "WARN: No snapshot_date input provided, skipping date validation"
+          fi
+
           echo "Mirror updated at $(date -u)" > public/index.html
+          echo "All files fetched and validated successfully."
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

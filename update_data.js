@@ -208,30 +208,38 @@ async function triggerGithubWorkflow({
   workflowFile = "mirror.yml",
   ref = "main",
   token = process.env.GITHUB_TOKEN,
+  inputs = {},
 } = {}) {
   if (!token) {
     console.warn("GITHUB_TOKEN not set; skipping workflow dispatch.");
     return null;
   }
   const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
+  const body = { ref };
+  if (inputs && Object.keys(inputs).length > 0) {
+    body.inputs = inputs;
+  }
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
     },
-    body: JSON.stringify({ ref }),
+    body: JSON.stringify(body),
   });
   if (res.status !== 204) {
     const txt = await res.text().catch(() => "");
     throw new Error(`workflow_dispatch failed: ${res.status} ${txt}`);
   }
   console.log(`Triggered GitHub workflow ${workflowFile} on ${owner}/${repo}@${ref}`);
+  if (inputs && Object.keys(inputs).length > 0) {
+    console.log(`  inputs: ${JSON.stringify(inputs)}`);
+  }
   return true;
 }
 
 
-async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false, generated_at: expectedGeneratedAt } = {}) {
+async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false, generated_at: expectedGeneratedAt, aggTxId } = {}) {
   const ttlSeconds = Number(ARNS_CONFIG.ttlSeconds);
   const bufferSeconds = 40;
   const waitMs = (ttlSeconds + bufferSeconds) * 1000;
@@ -252,15 +260,32 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
     const pointerOk = pointedTx === manifestTxId;
     if (!pointerOk) {
       console.warn("ArNS record does not yet point to the expected manifest.");
-      // Continue to try date verification via direct manifest path
     }
 
-    // Verify via collectors_artists_agg.json path (reads meta.snapshot_date)
-    const maxAttempts = 8; 
+    // Verify collectors_artists_agg.json is accessible and has correct snapshot_date.
+    // Prefer fetching by individual aggTxId (no manifest resolution needed),
+    // fall back to manifest path if aggTxId not provided.
+    const maxAttempts = 8;
     const retryDelayMs = 120000;
     for (let i = 1; i <= maxAttempts; i++) {
-      try {
-        const agg = await fetchJsonFollowRedirects(`https://arweave.net/${manifestTxId}/collectors_artists_agg.json`);
+      let agg = null;
+      for (const gateway of ARWEAVE_GATEWAYS) {
+        // Try direct aggTxId first, then manifest path as fallback
+        const urls = aggTxId
+          ? [`${gateway}/${aggTxId}`, `${gateway}/${manifestTxId}/collectors_artists_agg.json`]
+          : [`${gateway}/${manifestTxId}/collectors_artists_agg.json`];
+        for (const url of urls) {
+          try {
+            agg = await fetchJsonFollowRedirects(url, { attempts: 2, retryDelayMs: 3000 });
+            console.log(`  Fetched collectors_artists_agg.json via ${url}`);
+            break;
+          } catch (gwErr) {
+            console.warn(`  ${url}: ${gwErr?.message || gwErr}`);
+          }
+        }
+        if (agg) break;
+      }
+      if (agg) {
         const gotGeneratedAt = agg?.meta?.generated_at;
         console.log(`collectors_artists_agg.meta.generated_at: ${gotGeneratedAt || '<none>'}`);
         if (expectedGeneratedAt != null) {
@@ -279,8 +304,8 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
             return { ok: false, pointerOk: pointerOk, date: got };
           }
         }
-      } catch (e) {
-        console.warn(`Attempt ${i}/${maxAttempts} collectors_artists_agg.json not ready or missing: ${e?.message || e}`);
+      } else {
+        console.warn(`Attempt ${i}/${maxAttempts} collectors_artists_agg.json not ready on any gateway`);
       }
       await delay(retryDelayMs);
     }
@@ -410,15 +435,33 @@ async function downloadAndValidateSnapshot() {
   return { date, block, txnId };
 }
 
+// --- Arweave gateway fallback list (order = priority) ---
+const ARWEAVE_GATEWAYS = [
+  "https://arweave.net",
+  "https://ar-io.dev",
+  "https://vilenarios.com",
+  "https://arweave.fllstck.dev",
+  "https://g8way.io",
+];
+
 // --- Download collectors_cards.csv from Arweave txn id ---
 async function downloadCollectorsCsvFromArweave(dirPath, txnId) {
-  const url = `https://arweave.net/${txnId}`;
   const outPath = path.join(dirPath, "collectors_cards.csv");
-  console.log(`Downloading collectors_cards.csv from ${url} ...`);
-  const csv = await fetchTextFollowRedirects(url);
-  fs.writeFileSync(outPath, csv, "utf8");
-  console.log(`Saved collectors_cards.csv (${csv.length} bytes)`);
-  return outPath;
+  const errors = [];
+  for (const gateway of ARWEAVE_GATEWAYS) {
+    const url = `${gateway}/${txnId}`;
+    console.log(`Trying ${url} ...`);
+    try {
+      const csv = await fetchTextFollowRedirects(url, { attempts: 2, retryDelayMs: 3000 });
+      fs.writeFileSync(outPath, csv, "utf8");
+      console.log(`Saved collectors_cards.csv (${csv.length} bytes) via ${gateway}`);
+      return outPath;
+    } catch (err) {
+      console.warn(`  Failed (${gateway}): ${err.message}`);
+      errors.push(`${gateway}: ${err.message}`);
+    }
+  }
+  throw new Error(`All Arweave gateways failed for txn ${txnId}:\n  ${errors.join("\n  ")}`);
 }
 
 
@@ -1133,7 +1176,7 @@ async function uploadCsvsAndManifest(dirPath, snapshotMeta) {
   const manifestPath = path.join(dirPath, `manifest__${today}.json`);
   fs.writeFileSync(manifestPath, manifestJson, "utf8");
 
-  const summary = { cardsTxId, profilesTxId, manifestTxId };
+  const summary = { cardsTxId, profilesTxId, aggTxId, manifestTxId };
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf8");
   return summary;
 }
@@ -1220,6 +1263,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
     const existingManifest = readJsonSafe(manifestPath);
 
     let manifestTxId = prevSummary?.manifestTxId || null;
+    let aggTxId = prevSummary?.aggTxId || null;
     const hadPrevManifest = Boolean(manifestTxId);
     let uploadedNewManifest = false;
 
@@ -1236,6 +1280,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
         // Fetch snapshot meta only when needed.
         const uploadSummary = await uploadCsvsAndManifest(dirPath, snapshotMeta);
         manifestTxId = uploadSummary?.manifestTxId || null;
+        aggTxId = uploadSummary?.aggTxId || null;
         if (!hadPrevManifest && manifestTxId) uploadedNewManifest = true;
       } else {
         throw new Error("Required CSVs missing; skipping manifest upload");
@@ -1249,6 +1294,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       const verification = await verifyArnsAndManifestAfterTtl(manifestTxId, {
         earlyExitOnMismatchedDate: CONFIG.failIfDateMismatch,
         generated_at: aggObj.meta.generated_at,
+        aggTxId,
       });
       const expectedDate = getTodayCompact();
       const dateMismatch = verification?.date && verification.date !== expectedDate;
@@ -1266,6 +1312,9 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
             repo: "tnita-data",
             workflowFile: "mirror.yml",
             ref: "main",
+            inputs: {
+              snapshot_date: getTodayCompact(),
+            },
           });
         } catch (e) {
           console.error("Mirror workflow trigger failed:", e?.message || e);
