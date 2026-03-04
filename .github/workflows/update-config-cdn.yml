@@ -26,6 +26,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if config/script changed
+        id: config_changed
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "unknown")
+          if echo "$CHANGED" | grep -qE '^(config_updates\.json|scripts/update_config_cdn\.js|\.github/workflows/update-config-cdn\.yml)$'; then
+            echo "run_script=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_script=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -33,6 +45,7 @@ jobs:
           node-version: "20"
 
       - name: Update config and prepare public
+        if: steps.config_changed.outputs.run_script == 'true'
         run: node scripts/update_config_cdn.js
 
       - name: Setup Pages
