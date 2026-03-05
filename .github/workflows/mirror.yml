@@ -8,6 +8,9 @@ on:
       snapshot_date:
         description: "Expected snapshot_date (YYYYMMDD) for validation"
         required: false
+      generated_at:
+        description: "Expected meta.generated_at (ISO timestamp) for validation"
+        required: false
       agg_tx_id:
         description: "Direct aggTxId fallback (used only if ArNS serves stale data)"
         required: false
@@ -42,15 +45,13 @@ jobs:
           ARNS_NAME="the-network"
           GATEWAYS="arweave.net ar-io.dev vilenarios.com arweave.fllstck.dev g8way.io"
           SNAPSHOT_DATE="${{ inputs.snapshot_date }}"
+          GENERATED_AT="${{ inputs.generated_at }}"
           AGG_TX_ID="${{ inputs.agg_tx_id }}"
           OUT="public/collectors_artists_agg.json"
 
-          # check_date: validate snapshot_date in a fetched file. Returns 0 if valid.
           check_date () {
             local FILE="$1"
-            if [ -z "$SNAPSHOT_DATE" ]; then
-              return 0
-            fi
+            if [ -z "$SNAPSHOT_DATE" ]; then return 0; fi
             GOT=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('meta',{}).get('snapshot_date',''))" < "$FILE")
             if [ "$GOT" = "$SNAPSHOT_DATE" ]; then
               echo "    snapshot_date validated: $GOT"
@@ -61,6 +62,24 @@ jobs:
             fi
           }
 
+          check_generated_at () {
+            local FILE="$1"
+            if [ -z "$GENERATED_AT" ]; then return 0; fi
+            GOT=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('meta',{}).get('generated_at',''))" < "$FILE")
+            if [ "$GOT" = "$GENERATED_AT" ]; then
+              echo "    generated_at validated: $GOT"
+              return 0
+            else
+              echo "    MISMATCH: generated_at='$GOT' expected='$GENERATED_AT'"
+              return 1
+            fi
+          }
+
+          check_all () {
+            local FILE="$1"
+            check_date "$FILE" && check_generated_at "$FILE"
+          }
+
           # Phase 1: Try ArNS on each gateway, validate date on every response
           echo "Phase 1: Fetching via ArNS ..."
           FOUND=false
@@ -69,7 +88,7 @@ jobs:
             echo "  Trying $URL"
             if curl -fsSL --retry 2 --retry-delay 3 --max-time 120 "$URL" -o "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
               echo "  Got response via $GW ($(wc -c < "$OUT.tmp") bytes)"
-              if check_date "$OUT.tmp"; then
+              if check_all "$OUT.tmp"; then
                 mv "$OUT.tmp" "$OUT"
                 FOUND=true
                 break
@@ -87,7 +106,7 @@ jobs:
               echo "  Trying $URL"
               if curl -fsSL --retry 2 --retry-delay 3 --max-time 120 "$URL" -o "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
                 echo "  Got response via $GW ($(wc -c < "$OUT.tmp") bytes)"
-                if check_date "$OUT.tmp"; then
+                if check_all "$OUT.tmp"; then
                   mv "$OUT.tmp" "$OUT"
                   FOUND=true
                   break
