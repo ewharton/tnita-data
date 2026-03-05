@@ -3,6 +3,7 @@ import path from "path";
 import https from "https";
 import { Readable } from "stream";
 import { fileURLToPath } from "url";
+import { spawnSync } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,17 +13,18 @@ const CONFIG = {
   failIfDateMismatch: true,
   filter6529Collections: true,
   addBackupArtistInfo: true,
-  applyArtistExclusionList: false,
-  artistExclusionList: ["HugoFaz", "DreDogue"],
-  // applyArtistExclusionList: true,
-  // artistExclusionList: ["m0dest"],
+  // applyArtistExclusionList: false,
+  // artistExclusionList: ["HugoFaz", "DreDogue"],
+  applyArtistExclusionList: true,
+  artistExclusionList: ["m0dest"],
   allowMirrorFromAggTxId: true,
+  enforceGeneratedAtInMirror: true,
   uploadProvider: "arweave",
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
-const ARTISTS_BACKUP_DATE = "02_24_2026";
-// const ARTISTS_BACKUP_DATE = "LONG_NAME_TEST";
+// const ARTISTS_BACKUP_DATE = "02_24_2026";
+const ARTISTS_BACKUP_DATE = "LONG_NAME_TEST";
 const ARTISTS_BACKUP_FILENAME = `all_artists_backup_on_${ARTISTS_BACKUP_DATE}.json`;
 const ARTISTS_BACKUP_PATH = path.join(__dirname, ARTISTS_BACKUP_FILENAME);
 const LEGACY_ARTISTS_BACKUP_PATH = path.join(
@@ -142,7 +144,9 @@ async function fetchJsonFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
       .get(url, (res) => {
         let data = "";
         const status = res.statusCode || 0;
+        res.on("error", reject);
         if ([301, 302, 303, 307, 308].includes(status)) {
+          res.resume();
           if (maxRedirects <= 0) {
             reject(new Error(`Too many redirects fetching ${url}`));
             return;
@@ -157,6 +161,7 @@ async function fetchJsonFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
           return;
         }
         if (status === 202) {
+          res.resume();
           // Pending; retry with backoff
           if (attempts <= 1) {
             reject(new Error(`Content not yet available (202) at ${url}`));
@@ -168,6 +173,7 @@ async function fetchJsonFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
           return;
         }
         if (status !== 200) {
+          res.resume(); // Drain body so connection can be reused
           reject(new Error(`Request failed: ${status}`));
           return;
         }
@@ -215,36 +221,56 @@ async function triggerGithubWorkflow({
   token = process.env.GITHUB_TOKEN,
   inputs = {},
 } = {}) {
-  if (!token) {
-    console.warn("GITHUB_TOKEN not set; skipping workflow dispatch.");
-    return null;
+  const inputsObj = inputs && typeof inputs === "object" ? inputs : {};
+  const inputKeys = Object.keys(inputsObj).filter((k) => inputsObj[k] != null && inputsObj[k] !== "");
+  const successLog = () => {
+    console.log(`Triggered GitHub workflow ${workflowFile} on ${owner}/${repo}@${ref}`);
+    if (inputKeys.length > 0) console.log(`  inputs: ${JSON.stringify(inputsObj)}`);
+  };
+
+  try {
+    const args = ["workflow", "run", workflowFile, "--repo", `${owner}/${repo}`, "--ref", ref];
+    for (const k of inputKeys) {
+      args.push("-f", `${k}=${String(inputsObj[k])}`);
+    }
+    const result = spawnSync("gh", args, {
+      env: { ...process.env, ...(token && { GITHUB_TOKEN: token }) },
+      stdio: "inherit",
+    });
+    if (result.status !== 0) {
+      throw new Error(`gh CLI exited with code ${result.status}`);
+    }
+    successLog();
+    return true;
+  } catch (ghErr) {
+    if (!token) {
+      console.warn("GITHUB_TOKEN not set; gh failed, skipping REST fallback.");
+      return null;
+    }
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
+    const body = { ref };
+    if (inputKeys.length > 0) {
+      body.inputs = Object.fromEntries(inputKeys.map((k) => [k, String(inputsObj[k])]));
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 204) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`workflow_dispatch failed: ${res.status} ${txt}`);
+    }
+    successLog();
+    return true;
   }
-  const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
-  const body = { ref };
-  if (inputs && Object.keys(inputs).length > 0) {
-    body.inputs = inputs;
-  }
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (res.status !== 204) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`workflow_dispatch failed: ${res.status} ${txt}`);
-  }
-  console.log(`Triggered GitHub workflow ${workflowFile} on ${owner}/${repo}@${ref}`);
-  if (inputs && Object.keys(inputs).length > 0) {
-    console.log(`  inputs: ${JSON.stringify(inputs)}`);
-  }
-  return true;
 }
 
 
-async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false, generated_at: expectedGeneratedAt, aggTxId } = {}) {
+async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatchedDate = false, earlyExitOnMismatchedGeneratedAt = false, generated_at: expectedGeneratedAt, aggTxId } = {}) {
   const ttlSeconds = Number(ARNS_CONFIG.ttlSeconds);
   const bufferSeconds = 40;
   const waitMs = (ttlSeconds + bufferSeconds) * 1000;
@@ -275,6 +301,8 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
     for (let i = 1; i <= maxAttempts; i++) {
       let agg = null;
       for (const gateway of ARWEAVE_GATEWAYS) {
+        const gatewayHost = gateway.replace(/^https?:\/\//, "");
+        console.log(`  Attempt ${i}/${maxAttempts}: trying gateway ${gatewayHost} ...`);
         // Try direct aggTxId first, then manifest path as fallback
         const urls = aggTxId
           ? [`${gateway}/${aggTxId}`, `${gateway}/${manifestTxId}/collectors_artists_agg.json`]
@@ -293,26 +321,35 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
       if (agg) {
         const gotGeneratedAt = agg?.meta?.generated_at;
         console.log(`collectors_artists_agg.meta.generated_at: ${gotGeneratedAt || '<none>'}`);
+        const genAtMatch = expectedGeneratedAt == null || gotGeneratedAt === expectedGeneratedAt;
         if (expectedGeneratedAt != null) {
-          const genAtMatch = gotGeneratedAt === expectedGeneratedAt;
           console.log(`generated_at match: ${genAtMatch ? 'yes' : 'no'} (expected: ${expectedGeneratedAt})`);
+        }
+        if (!genAtMatch && earlyExitOnMismatchedGeneratedAt) {
+          console.warn("Early exit on mismatched generated_at due to strict setting.");
+          return { ok: false, pointerOk, date: agg?.meta?.snapshot_date || null, generatedAt: gotGeneratedAt };
         }
         const got = agg?.meta?.snapshot_date;
         const expected = getTodayCompact();
-        if (got === expected) {
+        if (got === expected && genAtMatch) {
           console.log(`collectors_artists_agg.meta.snapshot_date verified: ${got}`);
-          return { ok: true, pointerOk: pointerOk, date: got };
+          return { ok: true, pointerOk, date: got, generatedAt: gotGeneratedAt };
         } else {
-          console.warn(`Attempt ${i}/${maxAttempts}: collectors_artists_agg.meta.snapshot_date=${got || '<none>'} expected=${expected}`);
+          if (got !== expected) {
+            console.warn(`Attempt ${i}/${maxAttempts}: collectors_artists_agg.meta.snapshot_date=${got || '<none>'} expected=${expected}`);
+          }
           if (earlyExitOnMismatchedDate && got && got !== expected) {
             console.warn("Early exit on mismatched snapshot date due to strict setting.");
-            return { ok: false, pointerOk: pointerOk, date: got };
+            return { ok: false, pointerOk, date: got, generatedAt: gotGeneratedAt };
           }
         }
       } else {
-        console.warn(`Attempt ${i}/${maxAttempts} collectors_artists_agg.json not ready on any gateway`);
+        console.warn(`Attempt ${i}/${maxAttempts}: collectors_artists_agg.json not ready on any gateway`);
+        if (i < maxAttempts) {
+          console.log(`  Waiting ${retryDelayMs / 1000}s before retry ${i + 1}/${maxAttempts}...`);
+        }
       }
-      await delay(retryDelayMs);
+      if (i < maxAttempts) await delay(retryDelayMs);
     }
     console.warn("collectors_artists_agg.json verification did not complete within retries.");
     return { ok: false, pointerOk: pointerOk, date: null };
@@ -327,7 +364,9 @@ function fetchJson(url) {
     https
       .get(url, (res) => {
         let data = "";
+        res.on("error", reject);
         if (res.statusCode !== 200) {
+          res.resume();
           reject(new Error(`Request failed: ${res.statusCode}`));
           return;
         }
@@ -349,7 +388,9 @@ function fetchText(url) {
     https
       .get(url, (res) => {
         let data = "";
+        res.on("error", reject);
         if (res.statusCode !== 200) {
+          res.resume();
           reject(new Error(`Request failed: ${res.statusCode}`));
           return;
         }
@@ -366,7 +407,9 @@ async function fetchTextFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
     https
       .get(url, (res) => {
         const status = res.statusCode || 0;
+        res.on("error", reject);
         if ([301, 302, 303, 307, 308].includes(status)) {
+          res.resume();
           if (maxRedirects <= 0) {
             reject(new Error(`Too many redirects fetching ${url}`));
             return;
@@ -381,6 +424,7 @@ async function fetchTextFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
           return;
         }
         if (status === 202) {
+          res.resume();
           if (attempts <= 1) {
             reject(new Error(`Content not yet available (202) at ${url}`));
             return;
@@ -391,6 +435,7 @@ async function fetchTextFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
           return;
         }
         if (status !== 200) {
+          res.resume();
           reject(new Error(`Request failed: ${status}`));
           return;
         }
@@ -1298,6 +1343,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       }
       const verification = await verifyArnsAndManifestAfterTtl(manifestTxId, {
         earlyExitOnMismatchedDate: CONFIG.failIfDateMismatch,
+        earlyExitOnMismatchedGeneratedAt: CONFIG.enforceGeneratedAtInMirror,
         generated_at: aggObj.meta.generated_at,
         aggTxId,
       });
@@ -1320,6 +1366,9 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
             inputs: {
               snapshot_date: getTodayCompact(),
               ...(CONFIG.allowMirrorFromAggTxId && aggTxId ? { agg_tx_id: aggTxId } : {}),
+              ...(CONFIG.enforceGeneratedAtInMirror && aggObj.meta.generated_at
+                ? { generated_at: aggObj.meta.generated_at }
+                : {}),
             },
           });
         } catch (e) {
