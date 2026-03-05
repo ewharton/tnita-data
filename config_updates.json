@@ -1,12 +1,8 @@
 {
-  "oneOfOne": { "isReleased": true, "lookup": {"tokenId": "2"} },
+  "oneOfOne": { "isReleased": false, "allowUrlOverrides": true, "lookup": {"tokenId": "2"} },
   "ownerMode": {
     "memeOwners": {
-      "tokenId": "443"
+      "tokenId": "445"
     }
-  },
-  "controls": {
-    "maxVerticalAR": 0.8,
-    "forceResizeOnConfigUpdate": true
   }
 }

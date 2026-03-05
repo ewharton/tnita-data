@@ -14,11 +14,15 @@ const CONFIG = {
   addBackupArtistInfo: true,
   applyArtistExclusionList: false,
   artistExclusionList: ["HugoFaz", "DreDogue"],
+  // applyArtistExclusionList: true,
+  // artistExclusionList: ["m0dest"],
   allowMirrorFromAggTxId: true,
+  uploadProvider: "arweave",
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
 const ARTISTS_BACKUP_DATE = "02_24_2026";
+// const ARTISTS_BACKUP_DATE = "LONG_NAME_TEST";
 const ARTISTS_BACKUP_FILENAME = `all_artists_backup_on_${ARTISTS_BACKUP_DATE}.json`;
 const ARTISTS_BACKUP_PATH = path.join(__dirname, ARTISTS_BACKUP_FILENAME);
 const LEGACY_ARTISTS_BACKUP_PATH = path.join(
@@ -281,7 +285,7 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
             console.log(`  Fetched collectors_artists_agg.json via ${url}`);
             break;
           } catch (gwErr) {
-            console.warn(`  ${url}: ${gwErr?.message || gwErr}`);
+            console.warn(`  ${url} ${gwErr?.message || gwErr}`);
           }
         }
         if (agg) break;
@@ -1014,7 +1018,7 @@ async function uploadJsonDataWithTurbo(turbo, jsonObj, extraTags = []) {
 }
 
 function getUploadProvider() {
-  const raw = String(process.env.UPLOAD_PROVIDER || "auto").toLowerCase().trim();
+  const raw = String(CONFIG.uploadProvider || "auto").toLowerCase().trim();
   if (raw === "turbo" || raw === "arweave") return raw;
   return "auto";
 }
