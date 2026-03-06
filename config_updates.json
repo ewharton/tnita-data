@@ -1,8 +1,8 @@
 {
-  "oneOfOne": { "isReleased": false, "allowUrlOverrides": true, "lookup": {"tokenId": "2"} },
+  "oneOfOne": { "isReleased": false, "allowUrlOverrides": true, "lookup": {"tokenId": "3"} },
   "ownerMode": {
     "memeOwners": {
-      "tokenId": "445"
+      "tokenId": "2"
     }
   }
 }

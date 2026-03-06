@@ -13,18 +13,15 @@ const CONFIG = {
   failIfDateMismatch: true,
   filter6529Collections: true,
   addBackupArtistInfo: true,
-  // applyArtistExclusionList: false,
-  // artistExclusionList: ["HugoFaz", "DreDogue"],
-  applyArtistExclusionList: true,
-  artistExclusionList: ["m0dest"],
+  applyArtistExclusionList: false,
+  artistExclusionList: [""],
   allowMirrorFromAggTxId: true,
   enforceGeneratedAtInMirror: true,
   uploadProvider: "arweave",
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
-// const ARTISTS_BACKUP_DATE = "02_24_2026";
-const ARTISTS_BACKUP_DATE = "LONG_NAME_TEST";
+const ARTISTS_BACKUP_DATE = "02_24_2026";
 const ARTISTS_BACKUP_FILENAME = `all_artists_backup_on_${ARTISTS_BACKUP_DATE}.json`;
 const ARTISTS_BACKUP_PATH = path.join(__dirname, ARTISTS_BACKUP_FILENAME);
 const LEGACY_ARTISTS_BACKUP_PATH = path.join(
