@@ -1,8 +1,15 @@
 {
   "oneOfOne": { "isReleased": false, "allowUrlOverrides": true, "lookup": {"tokenId": "3"} },
   "ownerMode": {
+    "artistName": "Eddie Wharton",
     "memeOwners": {
-      "tokenId": "2"
+      "tokenId": "473"
+    }
+  },
+  "position": {
+    "layout": {
+      "originLabelMinPx": 16,
+      "directLabelMinPx": 7.25
     }
   }
 }
