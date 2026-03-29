@@ -1,9 +1,16 @@
 {
-  "oneOfOne": { "isReleased": false, "allowUrlOverrides": true, "lookup": {"tokenId": "3"} },
+  "oneOfOne": { "isReleased": true, "allowUrlOverrides": true, "lookup": {"tokenId": "3"} },
   "ownerMode": {
     "artistName": "Eddie Wharton",
     "memeOwners": {
       "tokenId": "473"
+    },
+    "colors": {
+      "memeRipple": [210, 100, 30]
+    },
+    "rippleMemes": {
+      "maxAlpha": 0.9,
+      "minAlpha": 0.5
     }
   },
   "position": {
