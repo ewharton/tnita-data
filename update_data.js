@@ -38,6 +38,12 @@ const ARNS_CONFIG = {
   ttlSeconds: 60,
 };
 
+const HTTP_REQUEST_TIMEOUT_MS = 30000;
+const HTTP_HEADERS = {
+  "User-Agent": "tnita-data-updater/1.0 (+https://github.com/ewharton/tnita-data)",
+  Accept: "*/*",
+};
+
 function getTodaySuffix() {
   const d = new Date();
   return `${String(d.getMonth() + 1).padStart(2, "0")}_${String(
@@ -135,56 +141,72 @@ function resolveRedirectUrl(currentUrl, locationHeader) {
   }
 }
 
+function isRetryableHttpStatus(status) {
+  return status === 403 || status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+function httpsGet(url, onResponse) {
+  const req = https.get(url, { headers: HTTP_HEADERS }, onResponse);
+  req.setTimeout(HTTP_REQUEST_TIMEOUT_MS, () => {
+    req.destroy(new Error(`Request timed out after ${HTTP_REQUEST_TIMEOUT_MS}ms`));
+  });
+  return req;
+}
+
 async function fetchJsonFollowRedirects(url, { maxRedirects = 5, attempts = 5, retryDelayMs = 2000 } = {}) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        let data = "";
-        const status = res.statusCode || 0;
-        res.on("error", reject);
-        if ([301, 302, 303, 307, 308].includes(status)) {
-          res.resume();
-          if (maxRedirects <= 0) {
-            reject(new Error(`Too many redirects fetching ${url}`));
-            return;
-          }
-          const loc = res.headers.location;
-          if (!loc) {
-            reject(new Error(`Redirect without Location from ${url}`));
-            return;
-          }
-          const nextUrl = resolveRedirectUrl(url, String(loc));
-          resolve(fetchJsonFollowRedirects(nextUrl, { maxRedirects: maxRedirects - 1, attempts, retryDelayMs }));
+    httpsGet(url, (res) => {
+      let data = "";
+      const status = res.statusCode || 0;
+      res.on("error", reject);
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        res.resume();
+        if (maxRedirects <= 0) {
+          reject(new Error(`Too many redirects fetching ${url}`));
           return;
         }
-        if (status === 202) {
-          res.resume();
-          // Pending; retry with backoff
-          if (attempts <= 1) {
-            reject(new Error(`Content not yet available (202) at ${url}`));
-            return;
-          }
+        const loc = res.headers.location;
+        if (!loc) {
+          reject(new Error(`Redirect without Location from ${url}`));
+          return;
+        }
+        const nextUrl = resolveRedirectUrl(url, String(loc));
+        resolve(fetchJsonFollowRedirects(nextUrl, { maxRedirects: maxRedirects - 1, attempts, retryDelayMs }));
+        return;
+      }
+      if (status === 202) {
+        res.resume();
+        // Pending; retry with backoff
+        if (attempts <= 1) {
+          reject(new Error(`Content not yet available (202) at ${url}`));
+          return;
+        }
+        setTimeout(() => {
+          resolve(fetchJsonFollowRedirects(url, { maxRedirects, attempts: attempts - 1, retryDelayMs }));
+        }, retryDelayMs);
+        return;
+      }
+      if (status !== 200) {
+        res.resume(); // Drain body so connection can be reused
+        if (attempts > 1 && isRetryableHttpStatus(status)) {
           setTimeout(() => {
             resolve(fetchJsonFollowRedirects(url, { maxRedirects, attempts: attempts - 1, retryDelayMs }));
           }, retryDelayMs);
           return;
         }
-        if (status !== 200) {
-          res.resume(); // Drain body so connection can be reused
-          reject(new Error(`Request failed: ${status}`));
-          return;
+        reject(new Error(`Request failed: ${status}`));
+        return;
+      }
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          reject(err);
         }
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (err) {
-            reject(err);
-          }
-        });
-      })
-      .on("error", reject);
+      });
+    }).on("error", reject);
   });
 }
 
@@ -358,90 +380,90 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        let data = "";
-        res.on("error", reject);
-        if (res.statusCode !== 200) {
-          res.resume();
-          reject(new Error(`Request failed: ${res.statusCode}`));
-          return;
+    httpsGet(url, (res) => {
+      let data = "";
+      res.on("error", reject);
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Request failed: ${res.statusCode}`));
+        return;
+      }
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          reject(err);
         }
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (err) {
-            reject(err);
-          }
-        });
-      })
-      .on("error", reject);
+      });
+    }).on("error", reject);
   });
 }
 
 function fetchText(url) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        let data = "";
-        res.on("error", reject);
-        if (res.statusCode !== 200) {
-          res.resume();
-          reject(new Error(`Request failed: ${res.statusCode}`));
-          return;
-        }
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve(data));
-      })
-      .on("error", reject);
+    httpsGet(url, (res) => {
+      let data = "";
+      res.on("error", reject);
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Request failed: ${res.statusCode}`));
+        return;
+      }
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve(data));
+    }).on("error", reject);
   });
 }
 
 async function fetchTextFollowRedirects(url, { maxRedirects = 5, attempts = 5, retryDelayMs = 2000 } = {}) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        const status = res.statusCode || 0;
-        res.on("error", reject);
-        if ([301, 302, 303, 307, 308].includes(status)) {
-          res.resume();
-          if (maxRedirects <= 0) {
-            reject(new Error(`Too many redirects fetching ${url}`));
-            return;
-          }
-          const loc = res.headers.location;
-          if (!loc) {
-            reject(new Error(`Redirect without Location from ${url}`));
-            return;
-          }
-          const nextUrl = resolveRedirectUrl(url, String(loc));
-          resolve(fetchTextFollowRedirects(nextUrl, { maxRedirects: maxRedirects - 1, attempts, retryDelayMs }));
+    httpsGet(url, (res) => {
+      const status = res.statusCode || 0;
+      res.on("error", reject);
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        res.resume();
+        if (maxRedirects <= 0) {
+          reject(new Error(`Too many redirects fetching ${url}`));
           return;
         }
-        if (status === 202) {
-          res.resume();
-          if (attempts <= 1) {
-            reject(new Error(`Content not yet available (202) at ${url}`));
-            return;
-          }
+        const loc = res.headers.location;
+        if (!loc) {
+          reject(new Error(`Redirect without Location from ${url}`));
+          return;
+        }
+        const nextUrl = resolveRedirectUrl(url, String(loc));
+        resolve(fetchTextFollowRedirects(nextUrl, { maxRedirects: maxRedirects - 1, attempts, retryDelayMs }));
+        return;
+      }
+      if (status === 202) {
+        res.resume();
+        if (attempts <= 1) {
+          reject(new Error(`Content not yet available (202) at ${url}`));
+          return;
+        }
+        setTimeout(() => {
+          resolve(fetchTextFollowRedirects(url, { maxRedirects, attempts: attempts - 1, retryDelayMs }));
+        }, retryDelayMs);
+        return;
+      }
+      if (status !== 200) {
+        res.resume();
+        if (attempts > 1 && isRetryableHttpStatus(status)) {
           setTimeout(() => {
             resolve(fetchTextFollowRedirects(url, { maxRedirects, attempts: attempts - 1, retryDelayMs }));
           }, retryDelayMs);
           return;
         }
-        if (status !== 200) {
-          res.resume();
-          reject(new Error(`Request failed: ${status}`));
-          return;
-        }
-        res.setEncoding("utf8");
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve(data));
-      })
-      .on("error", reject);
+        reject(new Error(`Request failed: ${status}`));
+        return;
+      }
+      res.setEncoding("utf8");
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve(data));
+    }).on("error", reject);
   });
 }
 
@@ -485,6 +507,7 @@ async function downloadAndValidateSnapshot() {
 // --- Arweave gateway fallback list (order = priority) ---
 const ARWEAVE_GATEWAYS = [
   "https://arweave.net",
+  "https://permagate.io",
   "https://ar-io.dev",
   "https://vilenarios.com",
   "https://arweave.fllstck.dev",
