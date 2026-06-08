@@ -38,6 +38,24 @@ const ARNS_CONFIG = {
   ttlSeconds: 60,
 };
 
+// AO endpoints used to read/write the ANT (ArNS) process.
+// The aoconnect "legacy" default CU (cu.ao-testnet.xyz) has been decommissioned
+// and now redirects to per-shard nodes that hang, which breaks the ArNS update.
+// Pin the CU to a healthy gateway and pass this connection explicitly to ANT.init.
+const AO_CONFIG = {
+  CU_URL: "https://cu.ardrive.io",
+  MU_URL: "https://mu.ao-testnet.xyz",
+  GATEWAY_URL: "https://arweave.net",
+};
+
+let _aoConnection = null;
+async function getAoConnection() {
+  if (_aoConnection) return _aoConnection;
+  const { connect } = await import("@permaweb/aoconnect");
+  _aoConnection = connect({ MODE: "legacy", ...AO_CONFIG });
+  return _aoConnection;
+}
+
 const HTTP_REQUEST_TIMEOUT_MS = 30000;
 const HTTP_HEADERS = {
   "User-Agent": "tnita-data-updater/1.0 (+https://github.com/ewharton/tnita-data)",
@@ -302,8 +320,9 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
     return false;
   }
   try {
-    const { ANT } = await import("@ar.io/sdk");
-    const antReadableAO = ANT.init({ processId });
+    const { ANT, AOProcess } = await import("@ar.io/sdk");
+    const ao = await getAoConnection();
+    const antReadableAO = ANT.init({ process: new AOProcess({ processId, ao }) });
     const rootRecordAO = await antReadableAO.getRecord({ undername: "@" });
     const pointedTx = rootRecordAO?.transactionId || null;
     console.log(`ArNS '@' now points to: ${pointedTx || '<none>'}`);
@@ -1264,7 +1283,7 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
     return null;
   }
   try {
-    const { ANT, ArweaveSigner } = await import("@ar.io/sdk");
+    const { ANT, AOProcess, ArweaveSigner } = await import("@ar.io/sdk");
     const Arweave = (await import("arweave")).default;
     const arweave = Arweave.init({ host: "arweave.net", port: 443, protocol: "https" });
     const signerAddress = await arweave.wallets.jwkToAddress(jwk);
@@ -1275,7 +1294,8 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       return null;
     }
 
-    const antReadableAO = ANT.init({ processId });
+    const ao = await getAoConnection();
+    const antReadableAO = ANT.init({ process: new AOProcess({ processId, ao }) });
     try {
       const rootRecordAO = await antReadableAO.getRecord({ undername: "@" });
       if (rootRecordAO?.transactionId === manifestTxId) {
@@ -1284,8 +1304,8 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       }
     } catch {}
 
-    const antAO = ANT.init({ processId, signer: new ArweaveSigner(jwk) });
-    const resAO = await antAO.setRecord({ undername: "@", transactionId: manifestTxId, ttlSeconds: ARNS_CONFIG.ttlSeconds });
+    const antAO = ANT.init({ process: new AOProcess({ processId, ao }), signer: new ArweaveSigner(jwk) });
+    const resAO = await antAO.setBaseNameRecord({ transactionId: manifestTxId, ttlSeconds: ARNS_CONFIG.ttlSeconds });
     console.log("ARNS AO setRecord result:", resAO?.id || resAO);
     return resAO?.id || null;
   } catch (e) {
