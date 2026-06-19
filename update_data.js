@@ -38,10 +38,6 @@ const ARNS_CONFIG = {
   ttlSeconds: 60,
 };
 
-// AO endpoints used to read/write the ANT (ArNS) process.
-// The aoconnect "legacy" default CU (cu.ao-testnet.xyz) has been decommissioned
-// and now redirects to per-shard nodes that hang, which breaks the ArNS update.
-// Pin the CU to a healthy gateway and pass this connection explicitly to ANT.init.
 const AO_CONFIG = {
   CU_URL: "https://cu.ardrive.io",
   MU_URL: "https://mu.ao-testnet.xyz",
@@ -323,12 +319,18 @@ async function verifyArnsAndManifestAfterTtl(manifestTxId, { earlyExitOnMismatch
     const { ANT, AOProcess } = await import("@ar.io/sdk");
     const ao = await getAoConnection();
     const antReadableAO = ANT.init({ process: new AOProcess({ processId, ao }) });
-    const rootRecordAO = await antReadableAO.getRecord({ undername: "@" });
-    const pointedTx = rootRecordAO?.transactionId || null;
-    console.log(`ArNS '@' now points to: ${pointedTx || '<none>'}`);
-    const pointerOk = pointedTx === manifestTxId;
-    if (!pointerOk) {
-      console.warn("ArNS record does not yet point to the expected manifest.");
+    // Informational only; CU dry-run failures must not abort gateway verification.
+    let pointerOk = false;
+    try {
+      const rootRecordAO = await antReadableAO.getRecord({ undername: "@" });
+      const pointedTx = rootRecordAO?.transactionId || null;
+      console.log(`ArNS '@' now points to: ${pointedTx || '<none>'}`);
+      pointerOk = pointedTx === manifestTxId;
+      if (!pointerOk) {
+        console.warn("ArNS record does not yet point to the expected manifest.");
+      }
+    } catch (pointerErr) {
+      console.warn(`ArNS pointer check skipped (non-fatal): ${pointerErr?.message || pointerErr}`);
     }
 
     // Verify collectors_artists_agg.json is accessible and has correct snapshot_date.
