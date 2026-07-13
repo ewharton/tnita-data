@@ -18,6 +18,9 @@ const CONFIG = {
   allowMirrorFromAggTxId: true,
   enforceGeneratedAtInMirror: true,
   uploadProvider: "arweave",
+  // ArNS moved AO->Solana (June 2026); AO writes are rejected (read_only SU). Skip the
+  // repoint until the name is claimed on Solana; mirror uses the aggTxId fallback.
+  disableArnsUpdate: true,
 };
 
 const ARTISTS_NAMES_ENDPOINT = "https://api.6529.io/api/memes/artists_names";
@@ -1379,9 +1382,13 @@ async function updateArnsTargetIfConfigured(manifestTxId) {
       }
     }
     if (manifestTxId) {
-      const arnsTx = await updateArnsTargetIfConfigured(manifestTxId);
-      if (uploadedNewManifest && !arnsTx) {
-        throw new Error("ARNS update failed (no txId) after manifest upload");
+      if (!CONFIG.disableArnsUpdate) {
+        const arnsTx = await updateArnsTargetIfConfigured(manifestTxId);
+        if (uploadedNewManifest && !arnsTx) {
+          throw new Error("ARNS update failed (no txId) after manifest upload");
+        }
+      } else {
+        console.log("ArNS repoint skipped (CONFIG.disableArnsUpdate); pointer left unchanged. Mirror uses aggTxId fallback for fresh data.");
       }
       const verification = await verifyArnsAndManifestAfterTtl(manifestTxId, {
         earlyExitOnMismatchedDate: CONFIG.failIfDateMismatch,
