@@ -584,7 +584,6 @@ async function downloadProfileData(dirPath) {
   }
 }
 
-// --- Download raw artists data (JSON) ---
 async function downloadArtistsRaw(dirPath) {
   console.log("Downloading artists raw data (memes/artists_names)...");
 
