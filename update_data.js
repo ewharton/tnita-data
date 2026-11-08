@@ -491,6 +491,18 @@ async function fetchTextFollowRedirects(url, { maxRedirects = 5, attempts = 5, r
   });
 }
 
+// --- Pull the bare 43-char Arweave txn id out of the snapshot url ---
+// The API has returned https://arweave.net/<id> and, as of Nov 2026, https://ardrive.net/<id>.
+// Match the id itself so a change of host doesn't break the download or the manifest.
+function extractArweaveTxId(value) {
+  const s = String(value).trim();
+  const m = s.match(/(?:^|\/)([A-Za-z0-9_-]{43})(?:[/?#]|$)/);
+  if (!m) {
+    throw new Error(`Could not parse an Arweave txn id from snapshot url: ${s}`);
+  }
+  return m[1];
+}
+
 // --- Download and validate the latest snapshot ---
 async function downloadAndValidateSnapshot() {
   const url = "https://api.6529.io/api/consolidated_uploads?page=1&page_size=10";
@@ -509,7 +521,7 @@ async function downloadAndValidateSnapshot() {
     throw new Error("Malformed snapshot data");
   }
 
-  const txnId = arweaveUrl.replace(/^https:\/\/arweave\.net\//, "").trim();
+  const txnId = extractArweaveTxId(arweaveUrl);
   const todayCompact = getTodayCompact();
 
   if (date !== todayCompact) {
@@ -531,6 +543,7 @@ async function downloadAndValidateSnapshot() {
 // --- Arweave gateway fallback list (order = priority) ---
 const ARWEAVE_GATEWAYS = [
   "https://arweave.net",
+  "https://ardrive.net",
   "https://permagate.io",
   "https://ar-io.dev",
   "https://vilenarios.com",
